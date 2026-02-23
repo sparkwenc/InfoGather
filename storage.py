@@ -25,8 +25,8 @@ class InfoStorage:
         return False
 
     # main methods
-    def insert_to_db(self, entries: list[dict]) -> tuple[int, int, int]:
-        """Insert entries and return (total_count, inserted_count, updated_count)."""
+    def insert_to_db(self, entries: list[dict]) -> None:
+        """Insert entries."""
 
         tot_cnt = len(entries)
         ins_cnt = 0
@@ -54,15 +54,16 @@ class InfoStorage:
                              version=version, updated=updated, content=content)
             upd_cnt += 1
 
-        return tot_cnt, ins_cnt, upd_cnt
+        print(
+            f"Insert result: {ins_cnt}/{tot_cnt} inserted, {upd_cnt}/{tot_cnt} updated")
 
     def favor_entry(self, srce_ty: str, srce_id: str, favored: int) -> None:
         """Update favored status for one entry"""
 
         self._update_row(srce_ty, srce_id, favored=favored)
 
-    def export_entries(self, filename: str, entry_filter: Callable[[dict], bool]) -> int:
-        """export all entries passing the filter to a markdown file, and return the count of exported entries"""
+    def export_entries(self, filename: str, entry_filter: Callable[[dict], bool]) -> None:
+        """export all entries passing the filter to a markdown file"""
 
         rows = self._fetch_all()
         exported = []
@@ -72,7 +73,8 @@ class InfoStorage:
                 exported.append(entry)
         self._write_to_markdown(filename, exported)
 
-        return len(exported)
+        print(
+            f"Export result: {len(exported)}/{len(rows)} to {filename} with {entry_filter.__name__}")
 
     # internal methods
     def _get_conn(self) -> sqlite3.Connection:
@@ -180,7 +182,6 @@ class InfoStorage:
     @staticmethod
     def _write_to_markdown(filename: str, exported: list[dict]) -> None:
         with open(filename, "w", encoding="utf-8") as f:
-            f.write(f"# Exported {len(exported)} entries\n\n")
             for entry in exported:
                 f.write(f"## {entry['srce_ty']}:{entry['srce_id']}\n\n")
                 f.write(f"- **Version:** {entry['version']}\n")

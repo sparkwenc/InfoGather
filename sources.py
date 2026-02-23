@@ -5,15 +5,23 @@ from datetime import datetime, timezone
 
 
 class InfoSources:
-    def __init__(self, conf: list) -> None:
+    def __init__(self, conf: dict) -> None:
         self._conf = conf
 
     # internal methods
     def _fetch_feeds(self) -> list:
         feeds = []
-        for url in self._conf:
+
+        n = len(self._conf)
+        cnt = 0
+        for ind, [url, abbrev] in enumerate(self._conf.items()):
             feed = feedparser.parse(url)
+            inc = len(feed.get("entries", []))
+            cnt += inc
+
             feeds.append(feed)
+            print(f"{ind + 1:2d}/{n:2d}: {inc:3d} from {abbrev}")
+        print(f"Source result: {cnt:3d} from {n} sources.")
         return feeds
 
     def normalized_feeds_arxiv(self) -> list:
@@ -44,5 +52,4 @@ class InfoSources:
                         "tags": tags,
                     },
                 })
-
         return normalized
