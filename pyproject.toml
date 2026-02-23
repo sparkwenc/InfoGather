@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "infogather"
+version = "0.1.0"
+description = "CLI tool for info garthering and management"
+requires-python = ">=3.13"
+dependencies = ["feedparser"]
+
+[project.scripts]
+inf = "infogather:main"

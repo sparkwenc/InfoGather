@@ -1,12 +1,18 @@
 import tomllib
 import argparse
+from pathlib import Path
 
-from sources import InfoSources
-from storage import InfoStorage
-from filters import InfoFilters
+from .sources import InfoSources
+from .storage import InfoStorage
+from .filters import InfoFilters
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_DB_PATH = PROJECT_ROOT / "data/entries.db"
+DEFAULT_CONFIG = PROJECT_ROOT / "conf/config.toml"
+DEFAULT_OUTPUT = PROJECT_ROOT / "output/feeds.md"
 
 
-def cmd_ins(args: argparse.Namespace) -> int:
+def _cmd_ins(args: argparse.Namespace) -> int:
     with open(args.conf, "rb") as f:
         conf = tomllib.load(f)
     sources = InfoSources(conf)
@@ -16,7 +22,7 @@ def cmd_ins(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_fav(args: argparse.Namespace) -> int:
+def _cmd_fav(args: argparse.Namespace) -> int:
     with InfoStorage(args.db_path) as storage:
         for srce_id in args.id:
             stat = storage.favor_entry(args.ty, srce_id, args.fav)
@@ -25,7 +31,7 @@ def cmd_fav(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_exp(args: argparse.Namespace) -> int:
+def _cmd_exp(args: argparse.Namespace) -> int:
     with InfoStorage(args.db_path) as storage:
         fn = getattr(InfoFilters, args.filter, None)
         if fn is None or not callable(fn):
@@ -34,17 +40,17 @@ def cmd_exp(args: argparse.Namespace) -> int:
     return 0
 
 
-def build_parser() -> argparse.ArgumentParser:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--db-path", default="entries.db",
+    parser.add_argument("--db-path", default=DEFAULT_DB_PATH,
                         help="SQLite database path")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     p_ins = subparsers.add_parser("ins", help="fetch new entries")
-    p_ins.add_argument("-c", "--conf", required=True,
+    p_ins.add_argument("-c", "--conf", default=DEFAULT_CONFIG,
                        help="configuration file path")
-    p_ins.set_defaults(func=cmd_ins)
+    p_ins.set_defaults(func=_cmd_ins)
 
     p_fav = subparsers.add_parser("fav", help="set favored entries")
     p_fav.add_argument("-t", "--ty", required=True, help="source type")
@@ -52,22 +58,18 @@ def build_parser() -> argparse.ArgumentParser:
                        help="source IDs")
     p_fav.add_argument("-f", "--fav", required=True,
                        type=int, choices=[0, 1])
-    p_fav.set_defaults(func=cmd_fav)
+    p_fav.set_defaults(func=_cmd_fav)
 
     p_exp = subparsers.add_parser("exp", help="export entries to markdown")
-    p_exp.add_argument("-o", "--output", required=True,
+    p_exp.add_argument("-o", "--output", default=DEFAULT_OUTPUT,
                        help="output markdown file")
-    p_exp.add_argument("-f", "--filter", required=True,
+    p_exp.add_argument("-f", "--filter", default="filter_ingestion",
                        help="filter function name")
-    p_exp.set_defaults(func=cmd_exp)
+    p_exp.set_defaults(func=_cmd_exp)
 
     return parser
 
 
 def main() -> int:
-    args = build_parser().parse_args()
+    args = _build_parser().parse_args()
     return args.func(args)
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

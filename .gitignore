@@ -1,7 +1,19 @@
-*
+.*
 !.gitignore
 
-!sources.py
-!storage.py
-!filters.py
-!main.py
+# builds 
+__pycache__/
+*.egg-info/
+
+# data
+data/
+
+# tests
+test/
+
+# output
+output/
+
+# config
+conf/*
+!conf/example.toml
