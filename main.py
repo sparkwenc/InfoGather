@@ -1,34 +1,73 @@
+import tomllib
+import argparse
+
 from sources import InfoSources
 from storage import InfoStorage
 from filters import InfoFilters
 
 
-conf = {
-    "https://rss.arxiv.org/rss/math.AG": "arXiv:Algebraic Geometry",
-    "https://rss.arxiv.org/rss/math.NT": "arXiv:Number Theory",
-    "https://rss.arxiv.org/rss/math.DG": "arXiv:Differential Geometry",
-    "https://rss.arxiv.org/rss/math.RT": "arXiv:Representation Theory",
-    # #
-    # "https://rss.arxiv.org/rss/math.SG": "arXiv:Symplectic Geometry",
-    # "https://rss.arxiv.org/rss/math.AC": "arXiv:Commutative Algebra",
-    # "https://rss.arxiv.org/rss/math.MP": "arXiv:Mathematical Physics",
-    # "https://rss.arxiv.org/rss/math.AT": "arXiv:Algebraic Topology",
-    # "https://rss.arxiv.org/rss/math.KT": "arXiv:K-theory",
-    # "https://rss.arxiv.org/rss/math.GT": "arXiv:Geometric Topology",
-    # #
-    # "https://rss.arxiv.org/rss/math.CV": "arXiv:Complex Variables",
-    # "https://rss.arxiv.org/rss/math.DS": "arXiv:Dynamical Systems",
-    # "https://rss.arxiv.org/rss/math.GR": "arXiv:Group Theory",
-    # "https://rss.arxiv.org/rss/math.CO": "arXiv:Combinatorics",
-    # "https://rss.arxiv.org/rss/math.CA": "arXiv:ODE",
-    # "https://rss.arxiv.org/rss/math.AP": "arXiv:PDE",
-    # #
-    # "https://rss.arxiv.org/rss/math.ST": "arXiv:Statistics",
-}
+def cmd_ins(args: argparse.Namespace) -> int:
+    with open(args.conf, "rb") as f:
+        conf = tomllib.load(f)
+    sources = InfoSources(conf)
+    with InfoStorage(args.db_path) as storage:
+        entries = sources.get_normalized_feeds()
+        storage.insert_to_db(entries)
+    return 0
 
-sources = InfoSources(conf)
-with InfoStorage("entries.db") as storage:
-    entries = sources.normalized_feeds_arxiv()
 
-    storage.insert_to_db(entries)
-    storage.export_entries("feb23.md", InfoFilters.filter_ingestion)
+def cmd_fav(args: argparse.Namespace) -> int:
+    with InfoStorage(args.db_path) as storage:
+        for srce_id in args.id:
+            stat = storage.favor_entry(args.ty, srce_id, args.fav)
+            print(
+                f"Updated favored status for {args.ty}:{srce_id} to {args.fav} with {stat}.")
+    return 0
+
+
+def cmd_exp(args: argparse.Namespace) -> int:
+    with InfoStorage(args.db_path) as storage:
+        fn = getattr(InfoFilters, args.filter, None)
+        if fn is None or not callable(fn):
+            raise ValueError(f"unknown filter function: {args.filter}")
+        storage.export_entries(args.output, fn)
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--db-path", default="entries.db",
+                        help="SQLite database path")
+
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    p_ins = subparsers.add_parser("ins", help="fetch new entries")
+    p_ins.add_argument("-c", "--conf", required=True,
+                       help="configuration file path")
+    p_ins.set_defaults(func=cmd_ins)
+
+    p_fav = subparsers.add_parser("fav", help="set favored entries")
+    p_fav.add_argument("-t", "--ty", required=True, help="source type")
+    p_fav.add_argument("-i", "--id", required=True, nargs="+",
+                       help="source IDs")
+    p_fav.add_argument("-f", "--fav", required=True,
+                       type=int, choices=[0, 1])
+    p_fav.set_defaults(func=cmd_fav)
+
+    p_exp = subparsers.add_parser("exp", help="export entries to markdown")
+    p_exp.add_argument("-o", "--output", required=True,
+                       help="output markdown file")
+    p_exp.add_argument("-f", "--filter", required=True,
+                       help="filter function name")
+    p_exp.set_defaults(func=cmd_exp)
+
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

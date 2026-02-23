@@ -8,25 +8,57 @@ class InfoSources:
     def __init__(self, conf: dict) -> None:
         self._conf = conf
 
+    def get_normalized_feeds(self) -> list:
+        """return normalized entries from all sources"""
+        raw_feeds = self._fetch_raw_feeds()
+
+        print("Normalizing feeds...")
+        normalized = []
+
+        cnt_n = 0
+        for srce_ty, feeds in raw_feeds.items():
+            fn = getattr(self, f"_normalized_{srce_ty}", None)
+            if fn is None or not callable(fn):
+                print(f"{srce_ty:5s}: unknown source type, skipped")
+                continue
+            result = fn(feeds)
+            cnt_n += len(result)
+            print(f"{srce_ty:5s}: {len(result):3d} normalized")
+            normalized.extend(result)
+        print(f"Total: {cnt_n:3d} normalized\n")
+        return normalized
+
     # internal methods
-    def _fetch_feeds(self) -> list:
-        feeds = []
+    def _fetch_raw_feeds(self) -> dict:
+        """fetch all feeds according to the configuration"""
 
-        n = len(self._conf)
-        cnt = 0
-        for ind, [url, abbrev] in enumerate(self._conf.items()):
-            feed = feedparser.parse(url)
-            inc = len(feed.get("entries", []))
-            cnt += inc
-
-            feeds.append(feed)
-            print(f"{ind + 1:2d}/{n:2d}: {inc:3d} from {abbrev}")
-        print(f"Source result: {cnt:3d} from {n} sources.")
+        cnt_f = len(self._conf)
+        tot_f = 0
+        print(f"Fetching feeds from {cnt_f} source types...")
+        feeds = {}
+        for ind_f, [srce_ty, lists] in enumerate(self._conf.items()):
+            feeds[srce_ty] = []
+            cnt = len(lists)
+            tot = 0
+            print(
+                f"{ind_f + 1:2d}/{cnt_f:2d}-{srce_ty:5s}: Fetching from {cnt} sources...")
+            for ind, item in enumerate(lists):
+                feed = feedparser.parse(item["url"])
+                feeds[srce_ty].append(feed)
+                inc = len(feed.get("entries", []))
+                tot += inc
+                print(
+                    f"      {ind + 1:2d}/{cnt:2d}: {inc:3d} from {item["name"]}")
+            print(f"      Total: {tot:3d} entries from {cnt} sources")
+            tot_f += tot
+        print(f"Total: {tot_f:3d} entries from {cnt_f} source types\n")
         return feeds
 
-    def normalized_feeds_arxiv(self) -> list:
+    def _normalized_arXiv(self, feeds: list) -> list:
+        """normalized arXiv feeds"""
+
         normalized = []
-        for feed in self._fetch_feeds():
+        for feed in feeds:
             entries = feed.get("entries", [])
             st = time.struct_time(
                 feed.get("feed", {}).get("updated_parsed", []))
@@ -53,3 +85,7 @@ class InfoSources:
                     },
                 })
         return normalized
+
+    def _normalized_AMS(self, feeds: list) -> list:
+        # TODO: implement AMS normalization
+        return []

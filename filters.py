@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 class InfoFilters:
     @staticmethod
-    def filter_true(entry: dict) -> bool:
+    def filter_true(_: dict) -> bool:
         """default filter: allow all entries"""
 
         return True

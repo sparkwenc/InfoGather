@@ -57,10 +57,10 @@ class InfoStorage:
         print(
             f"Insert result: {ins_cnt}/{tot_cnt} inserted, {upd_cnt}/{tot_cnt} updated")
 
-    def favor_entry(self, srce_ty: str, srce_id: str, favored: int) -> None:
+    def favor_entry(self, srce_ty: str, srce_id: str, favored: int) -> int:
         """Update favored status for one entry"""
 
-        self._update_row(srce_ty, srce_id, favored=favored)
+        return self._update_row(srce_ty, srce_id, favored=favored)
 
     def export_entries(self, filename: str, entry_filter: Callable[[dict], bool]) -> None:
         """export all entries passing the filter to a markdown file"""
@@ -140,7 +140,7 @@ class InfoStorage:
                     favored: int | None = None,
                     updated: str | None = None,
                     content: str | None = None,
-                    ) -> None:
+                    ) -> int:
         sets = []
         pars = []
         if version is not None:
@@ -161,7 +161,8 @@ class InfoStorage:
         pars.extend([srce_ty, srce_id])
         sql = f"UPDATE tab_entries SET {', '.join(sets)} WHERE srce_ty = ? AND srce_id = ?"
         with self._get_conn() as conn:
-            conn.execute(sql, pars)
+            cur = conn.execute(sql, pars)
+        return cur.rowcount
 
     # helper methods
     @staticmethod
