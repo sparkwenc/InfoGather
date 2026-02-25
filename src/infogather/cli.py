@@ -18,7 +18,7 @@ def _cmd_ins(args: argparse.Namespace) -> int:
     sources = InfoSources(conf)
     with InfoStorage(args.db_path) as storage:
         entries = sources.get_normalized_feeds()
-        storage.insert_to_db(entries)
+        storage.insert_entries(entries)
     return 0
 
 

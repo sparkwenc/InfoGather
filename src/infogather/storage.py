@@ -25,7 +25,7 @@ class InfoStorage:
         return False
 
     # main methods
-    def insert_to_db(self, entries: list[dict]) -> None:
+    def insert_entries(self, entries: list[dict]) -> None:
         """Insert entries."""
 
         tot_cnt = len(entries)
@@ -61,6 +61,11 @@ class InfoStorage:
         """Update favored status for one entry"""
 
         return self._update_row(srce_ty, srce_id, favored=favored)
+
+    def remove_entry(self, srce_ty: str, srce_id: str) -> int:
+        """Remove one entry"""
+
+        return self._delete_row(srce_ty, srce_id)
 
     def export_entries(self, filename: str, entry_filter: Callable[[dict], bool]) -> None:
         """export all entries passing the filter to a markdown file"""
@@ -105,35 +110,40 @@ class InfoStorage:
             )
 
     def _fetch_one(self, srce_ty: str, srce_id: str) -> sqlite3.Row | None:
-        return self._get_conn().execute(
-            """
-            SELECT version
-            FROM tab_entries
-            WHERE srce_ty = ? AND srce_id = ?
-            """,
-            (srce_ty, srce_id),
-        ).fetchone()
+        with self._get_conn() as conn:
+            cur = conn.execute(
+                """
+                SELECT version
+                FROM tab_entries
+                WHERE srce_ty = ? AND srce_id = ?
+                """,
+                (srce_ty, srce_id),
+            )
+        return cur.fetchone()
 
-    def _fetch_all(self) -> list[sqlite3.Row] | None:
-        return self._get_conn().execute(
-            """
-            SELECT srce_ty, srce_id, version, favored, updated, content
-            FROM tab_entries
-            ORDER BY srce_ty, srce_id
-            """
-        ).fetchall()
+    def _fetch_all(self) -> list[sqlite3.Row]:
+        with self._get_conn() as conn:
+            cur = conn.execute(
+                """
+                SELECT srce_ty, srce_id, version, favored, updated, content
+                FROM tab_entries
+                ORDER BY srce_ty, srce_id
+                """
+            )
+        return cur.fetchall()
 
     def _insert_row(self, srce_ty: str, srce_id: str,
                     version: int, favored: int, updated: str, content: str
-                    ) -> None:
+                    ) -> int:
         with self._get_conn() as conn:
-            conn.execute(
+            cur = conn.execute(
                 """
                 INSERT INTO tab_entries (srce_ty, srce_id, version, favored, updated, content)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (srce_ty, srce_id, version, favored, updated, content),
             )
+        return cur.rowcount
 
     def _update_row(self, srce_ty: str, srce_id: str,
                     version: int | None = None,
@@ -157,11 +167,22 @@ class InfoStorage:
             pars.append(content)
 
         if not sets:
-            return
+            return 0
         pars.extend([srce_ty, srce_id])
         sql = f"UPDATE tab_entries SET {', '.join(sets)} WHERE srce_ty = ? AND srce_id = ?"
         with self._get_conn() as conn:
             cur = conn.execute(sql, pars)
+        return cur.rowcount
+
+    def _delete_row(self, srce_ty: str, srce_id: str) -> int:
+        with self._get_conn() as conn:
+            cur = conn.execute(
+                """
+                DELETE FROM tab_entries
+                WHERE srce_ty = ? AND srce_id = ?
+                """,
+                (srce_ty, srce_id),
+            )
         return cur.rowcount
 
     # helper methods
