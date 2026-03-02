@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools"]
-build-backend = "setuptools.build_meta"
+requires = ["uv_build>=0.4.0"]
+build-backend = "uv_build"
 
 [project]
 name = "infogather"
