@@ -7,6 +7,7 @@
       pendingReset: false,
       selectedSelectors: new Set(),
       favoredOnly: false,
+      unnoticedOnly: false,
       updatedWithinDay: false,
       updatedWithinWeek: false,
       versionIs1: false,

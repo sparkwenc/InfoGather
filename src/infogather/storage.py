@@ -37,13 +37,14 @@ class InfoStorage:
             srce_id = entry["srce_id"]
             version = entry["version"]
             favored = entry["favored"]
+            noticed = int(entry.get("noticed", 0))
             updated = entry["updated"]
             content = json.dumps(entry["content"], ensure_ascii=False)
 
             existing = self._fetch_one(srce_ty, srce_id)
             if existing is None:
                 self._insert_row(srce_ty, srce_id,
-                                 version, favored, updated, content)
+                                 version, favored, noticed, updated, content)
                 ins_cnt += 1
                 continue
 
@@ -51,7 +52,7 @@ class InfoStorage:
                 continue
 
             self._update_row(srce_ty, srce_id,
-                             version=version, updated=updated, content=content)
+                             version=version, noticed=0, updated=updated, content=content)
             upd_cnt += 1
 
         print(
@@ -61,6 +62,11 @@ class InfoStorage:
         """Update favored status for one entry"""
 
         return self._update_row(srce_ty, srce_id, favored=favored)
+
+    def notice_entry(self, srce_ty: str, srce_id: str, noticed: int) -> int:
+        """Update noticed status for one entry"""
+
+        return self._update_row(srce_ty, srce_id, noticed=noticed)
 
     def remove_entry(self, srce_ty: str, srce_id: str) -> int:
         """Remove one entry"""
@@ -80,11 +86,6 @@ class InfoStorage:
 
         print(
             f"Export result: {len(exported)}/{len(rows)} to {filename} with {entry_filter.__name__}")
-
-    def remove_entry(self, srce_ty: str, srce_id: str) -> int:
-        """Remove one"""
-
-        return self._delete_row(srce_ty, srce_id)
 
     def export_entries_json(
         self,
@@ -116,6 +117,7 @@ class InfoStorage:
                     srce_id TEXT NOT NULL,
                     version INTEGER NOT NULL DEFAULT 1,
                     favored INTEGER NOT NULL DEFAULT 0,
+                    noticed INTEGER NOT NULL DEFAULT 0,
                     updated TEXT NOT NULL,
                     content TEXT NOT NULL,
                     PRIMARY KEY (srce_ty, srce_id)
@@ -124,6 +126,9 @@ class InfoStorage:
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_entries_favored ON tab_entries(favored)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entries_noticed ON tab_entries(noticed)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_entries_updated ON tab_entries(updated)"
@@ -145,7 +150,7 @@ class InfoStorage:
         with self._get_conn() as conn:
             cur = conn.execute(
                 """
-                SELECT srce_ty, srce_id, version, favored, updated, content
+                SELECT srce_ty, srce_id, version, favored, noticed, updated, content
                 FROM tab_entries
                 ORDER BY srce_ty, srce_id
                 """
@@ -153,21 +158,22 @@ class InfoStorage:
         return cur.fetchall()
 
     def _insert_row(self, srce_ty: str, srce_id: str,
-                    version: int, favored: int, updated: str, content: str
+                    version: int, favored: int, noticed: int, updated: str, content: str
                     ) -> int:
         with self._get_conn() as conn:
             cur = conn.execute(
                 """
-                INSERT INTO tab_entries (srce_ty, srce_id, version, favored, updated, content)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO tab_entries (srce_ty, srce_id, version, favored, noticed, updated, content)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (srce_ty, srce_id, version, favored, updated, content),
+                (srce_ty, srce_id, version, favored, noticed, updated, content),
             )
         return cur.rowcount
 
     def _update_row(self, srce_ty: str, srce_id: str,
                     version: int | None = None,
                     favored: int | None = None,
+                    noticed: int | None = None,
                     updated: str | None = None,
                     content: str | None = None,
                     ) -> int:
@@ -179,6 +185,9 @@ class InfoStorage:
         if favored is not None:
             sets.append("favored = ?")
             pars.append(favored)
+        if noticed is not None:
+            sets.append("noticed = ?")
+            pars.append(noticed)
         if updated is not None:
             sets.append("updated = ?")
             pars.append(updated)
@@ -217,6 +226,7 @@ class InfoStorage:
             "srce_id": row["srce_id"],
             "version": row["version"],
             "favored": row["favored"],
+            "noticed": row["noticed"],
             "updated": row["updated"],
             "content": json.loads(row["content"]),
         }
@@ -228,6 +238,7 @@ class InfoStorage:
                 f.write(f"## {entry['srce_ty']}:{entry['srce_id']}\n\n")
                 f.write(f"- **Version:** {entry['version']}\n")
                 f.write(f"- **Favored:** {bool(entry['favored'])}\n")
+                f.write(f"- **Noticed:** {bool(entry.get('noticed', 0))}\n")
                 f.write(f"- **Updated:** {entry['updated']}\n\n")
                 f.write(f"- **Content**\n")
                 for k, v in entry["content"].items():

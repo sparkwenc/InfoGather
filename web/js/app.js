@@ -21,6 +21,7 @@ const treeListEl = document.getElementById("tree-list");
 const clearTagsEl = document.getElementById("clear-tags");
 
 const favoredBtn = document.getElementById("favored-btn");
+const unnoticedBtn = document.getElementById("unnoticed-btn");
 const dayBtn = document.getElementById("day-btn");
 const weekBtn = document.getElementById("week-btn");
 const versionBtn = document.getElementById("version-btn");
@@ -70,6 +71,7 @@ function buildFilterParams() {
     q: qEl.value.trim()
   });
   if (state.favoredOnly) params.set("favored", "1");
+  if (state.unnoticedOnly) params.set("unnoticed", "1");
   if (state.updatedWithinDay) params.set("updated_within_day", "1");
   if (state.updatedWithinWeek) params.set("updated_within_week", "1");
   if (state.versionIs1) params.set("version_is_1", "1");
@@ -147,6 +149,19 @@ async function updateFavored(item, favored, btnEl) {
   }
 }
 
+async function updateNoticed(item, noticed, btnEl) {
+  btnEl.disabled = true;
+  try {
+    await api.setNoticed(item.srce_ty, item.srce_id, noticed);
+    refreshFilteredView();
+  } catch (err) {
+    console.error(err);
+    window.alert("已读状态更新失败，请稍后重试。");
+  } finally {
+    btnEl.disabled = false;
+  }
+}
+
 async function removeEntry(item, btnEl) {
   const ok = window.confirm(`确认删除 ${item.srce_ty}:${item.srce_id} ?`);
   if (!ok) return;
@@ -207,6 +222,7 @@ async function fetchEntries({ reset = false } = {}) {
         items.forEach((item) => {
           const card = ui.makeCard(item, {
             onToggleFavored: updateFavored,
+            onToggleNoticed: updateNoticed,
             onRemove: removeEntry
           });
           fragment.appendChild(card);
@@ -220,6 +236,7 @@ async function fetchEntries({ reset = false } = {}) {
       items.forEach((item) => {
         const card = ui.makeCard(item, {
           onToggleFavored: updateFavored,
+          onToggleNoticed: updateNoticed,
           onRemove: removeEntry
         });
         listEl.appendChild(card);
@@ -252,6 +269,14 @@ favoredBtn.addEventListener("click", () => {
   ui.setToggle(favoredBtn, state.favoredOnly);
   refreshFilteredView();
 });
+
+if (unnoticedBtn) {
+  unnoticedBtn.addEventListener("click", () => {
+    state.unnoticedOnly = !state.unnoticedOnly;
+    ui.setToggle(unnoticedBtn, state.unnoticedOnly);
+    refreshFilteredView();
+  });
+}
 
 dayBtn.addEventListener("click", () => {
   state.updatedWithinDay = !state.updatedWithinDay;
@@ -310,6 +335,7 @@ moreEl.addEventListener("click", () => {
 
 async function bootstrap() {
   ui.setToggle(favoredBtn, false);
+  if (unnoticedBtn) ui.setToggle(unnoticedBtn, false);
   ui.setToggle(dayBtn, false);
   ui.setToggle(weekBtn, false);
   ui.setToggle(versionBtn, false);

@@ -72,6 +72,7 @@
   function makeCard(item, handlers) {
     const c = item.content || {};
     const favoredValue = Number(item.favored || 0);
+    const noticedValue = Number(item.noticed || 0);
     const card = document.createElement("article");
     card.className = "card";
 
@@ -98,6 +99,17 @@
       await handlers.onToggleFavored(item, next, favBtn);
     });
 
+    const noticeBtn = document.createElement("button");
+    noticeBtn.type = "button";
+    noticeBtn.className = noticedValue === 1 ? "notice-btn on" : "notice-btn";
+    noticeBtn.dataset.noticed = String(noticedValue);
+    noticeBtn.textContent = noticedValue === 1 ? "已读" : "未读";
+    noticeBtn.addEventListener("click", async () => {
+      const current = Number(noticeBtn.dataset.noticed || 0);
+      const next = current === 1 ? 0 : 1;
+      await handlers.onToggleNoticed(item, next, noticeBtn);
+    });
+
     const delBtn = document.createElement("button");
     delBtn.type = "button";
     delBtn.className = "del-btn";
@@ -108,6 +120,7 @@
 
     const actions = document.createElement("div");
     actions.className = "card-actions";
+    actions.appendChild(noticeBtn);
     actions.appendChild(favBtn);
     actions.appendChild(delBtn);
 
@@ -120,6 +133,7 @@
       "作者: " + (c.auth || "-"),
       "来源: " + (item.srce_ty || "-") + ":" + (item.srce_id || "-"),
       "版本: v" + (item.version ?? "-"),
+      "已读: " + (item.noticed ? "是" : "否"),
       "收藏: " + (item.favored ? "是" : "否")
     ].join("  ·  ");
 

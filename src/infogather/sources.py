@@ -75,6 +75,7 @@ class InfoSources:
                     "srce_id": id,
                     "version": int(ver),
                     "favored": 0,
+                    "noticed": 0,
                     "updated": dt,
                     "content": {
                         "link": entry.get("link"),

@@ -316,6 +316,7 @@ class InfoHandler(SimpleHTTPRequestHandler):
 
     def _build_entry_filter(self, query: dict[str, list[str]]):
         favored = _parse_flag(query.get("favored", [""])[0])
+        unnoticed = _parse_flag(query.get("unnoticed", [""])[0])
         updated_within_day = _parse_flag(
             query.get("updated_within_day", [""])[0])
         updated_within_week = _parse_flag(
@@ -332,6 +333,8 @@ class InfoHandler(SimpleHTTPRequestHandler):
 
         def entry_filter(entry: dict) -> bool:
             if favored and int(entry.get("favored", 0)) != 1:
+                return False
+            if unnoticed and int(entry.get("noticed", 0)) != 0:
                 return False
             if version_is_1 and int(entry.get("version", 0)) != 1:
                 return False
@@ -388,6 +391,9 @@ class InfoHandler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/favored":
             self._handle_favored()
+            return
+        if parsed.path == "/api/noticed":
+            self._handle_noticed()
             return
         self._write_json(
             {"error": "not found"},
@@ -573,6 +579,52 @@ class InfoHandler(SimpleHTTPRequestHandler):
         self._write_json(
             {"ok": True, "updated": int(
                 updated), "srce_ty": srce_ty, "srce_id": srce_id, "favored": favored}
+        )
+
+    def _handle_noticed(self) -> None:
+        payload = self._read_json_body()
+        if payload is None:
+            self._write_json(
+                {"error": "invalid JSON body"},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+
+        srce_ty = str(payload.get("srce_ty", "")).strip()
+        srce_id = str(payload.get("srce_id", "")).strip()
+        noticed_raw = payload.get("noticed")
+        try:
+            noticed = int(noticed_raw)
+        except (TypeError, ValueError):
+            noticed = -1
+
+        if not srce_ty or not srce_id or noticed not in (0, 1):
+            self._write_json(
+                {"error": "srce_ty, srce_id and noticed(0/1) are required"},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+
+        try:
+            with InfoStorage(str(self._db_path)) as storage:
+                updated = storage.notice_entry(srce_ty, srce_id, noticed)
+        except Exception as exc:
+            self._write_json(
+                {"error": f"failed to update noticed: {exc}"},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+            return
+
+        if not updated:
+            self._write_json(
+                {"error": "entry not found"},
+                status=HTTPStatus.NOT_FOUND,
+            )
+            return
+
+        self._write_json(
+            {"ok": True, "updated": int(
+                updated), "srce_ty": srce_ty, "srce_id": srce_id, "noticed": noticed}
         )
 
     def _handle_remove_entry(self) -> None:

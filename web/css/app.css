@@ -279,6 +279,22 @@ body {
   border-color: #f2d674;
   color: #8a5a00;
 }
+.notice-btn {
+  border: 1px solid #d8e2f2;
+  background: #f8fafc;
+  color: #334155;
+  border-radius: 999px;
+  height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.notice-btn.on {
+  background: #e9fbef;
+  border-color: #86efac;
+  color: #166534;
+}
 .del-btn {
   border: 1px solid #fecaca;
   background: #fff1f2;

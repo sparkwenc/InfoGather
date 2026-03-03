@@ -63,6 +63,23 @@
     return payload;
   }
 
+  async function setNoticed(srceTy, srceId, noticed) {
+    const resp = await fetch("/api/noticed", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        srce_ty: srceTy,
+        srce_id: srceId,
+        noticed: noticed
+      })
+    });
+    const payload = await parsePayload(resp);
+    if (!resp.ok || !payload.ok) {
+      throw makeHttpError(resp, payload);
+    }
+    return payload;
+  }
+
   async function removeEntry(srceTy, srceId) {
     const resp = await fetch("/api/remove-entry", {
       method: "POST",
@@ -85,6 +102,7 @@
     getTagTree,
     getEntries,
     setFavored,
+    setNoticed,
     removeEntry
   };
 })(window);
