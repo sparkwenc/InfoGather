@@ -41,15 +41,18 @@ body {
 }
 .sidebar {
   position: fixed;
-  left: max(16px, calc((100vw - 1160px) / 2 + 16px));
   top: 88px;
   width: 280px;
   max-height: calc(100vh - 104px);
   overflow: auto;
-  padding: 0 8px 8px 0;
   background: transparent;
   border: none;
   box-shadow: none;
+}
+.sidebar-left {
+  left: max(16px, calc((100vw - 1160px) / 2 + 16px));
+  right: auto;
+  padding: 0 8px 8px 0;
 }
 .side-title {
   font-size: 14px;
@@ -146,6 +149,15 @@ body {
   display: flex;
   gap: 8px;
 }
+.side-ins {
+  margin-bottom: 8px;
+}
+.side-ins-btn {
+  width: 100%;
+}
+.side-ins-panel {
+  margin-top: 8px;
+}
 .btn {
   border: 1px solid var(--line);
   border-radius: 9px;
@@ -169,6 +181,7 @@ body {
 }
 .main {
   margin-left: 294px;
+  margin-right: 0;
   padding: 12px;
 }
 .controls {
@@ -342,6 +355,7 @@ body {
   .sidebar {
     position: static;
     left: auto;
+    right: auto;
     top: auto;
     width: auto;
     max-height: none;
@@ -353,6 +367,7 @@ body {
   }
   .main {
     margin-left: 0;
+    margin-right: 0;
   }
   .controls input[type="search"] {
     width: 100%;

@@ -151,12 +151,12 @@
   }
 
   function renderTree(treeListEl, state, handlers) {
-    treeListEl.innerHTML = "";
+    const fragment = document.createDocumentFragment();
     if (!state.treeGroups.length) {
       const empty = document.createElement("li");
       empty.className = "tree-item";
       empty.innerHTML = '<label>暂无源</label>';
-      treeListEl.appendChild(empty);
+      treeListEl.replaceChildren(empty);
       return;
     }
 
@@ -228,8 +228,9 @@
       });
 
       groupLi.appendChild(childUl);
-      treeListEl.appendChild(groupLi);
+      fragment.appendChild(groupLi);
     });
+    treeListEl.replaceChildren(fragment);
   }
 
   global.InfoUI = {

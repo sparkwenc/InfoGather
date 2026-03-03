@@ -289,6 +289,13 @@ class InfoHandler(SimpleHTTPRequestHandler):
         self._db_path = db_path
         super().__init__(*args, directory=str(WEB_DIR), **kwargs)
 
+    def end_headers(self) -> None:
+        self.send_header(
+            "Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        super().end_headers()
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/api/entries":
@@ -298,7 +305,7 @@ class InfoHandler(SimpleHTTPRequestHandler):
             self._handle_ins_status()
             return
         if parsed.path == "/api/tag-tree":
-            self._handle_tag_tree()
+            self._handle_tag_tree(parsed.query)
             return
         if parsed.path == "/api/health":
             self._write_json({"ok": True})
@@ -307,32 +314,15 @@ class InfoHandler(SimpleHTTPRequestHandler):
             self.path = "/index.html"
         super().do_GET()
 
-    def do_POST(self) -> None:
-        parsed = urlparse(self.path)
-        if parsed.path == "/api/ins/run":
-            self._handle_ins_run()
-            return
-        if parsed.path == "/api/remove-entry":
-            self._handle_remove_entry()
-            return
-        if parsed.path == "/api/favored":
-            self._handle_favored()
-            return
-        self._write_json(
-            {"error": "not found"},
-            status=HTTPStatus.NOT_FOUND,
-        )
-
-    def _handle_entries(self, raw_query: str) -> None:
-        query = parse_qs(raw_query)
-        limit = _parse_int(query.get("limit", ["30"])[
-                           0], 30, min_value=1, max_value=200)
-        offset = _parse_int(query.get("offset", ["0"])[
-                            0], 0, min_value=0, max_value=1_000_000)
+    def _build_entry_filter(self, query: dict[str, list[str]]):
         favored = _parse_flag(query.get("favored", [""])[0])
+        updated_within_day = _parse_flag(
+            query.get("updated_within_day", [""])[0])
         updated_within_week = _parse_flag(
             query.get("updated_within_week", [""])[0])
         version_is_1 = _parse_flag(query.get("version_is_1", [""])[0])
+        version_is_not_1 = _parse_flag(
+            query.get("version_is_not_1", [""])[0])
         selected_tags, selected_source_types = _parse_selectors(
             query.get("selectors", []))
         # Backward compatibility for older clients.
@@ -345,8 +335,17 @@ class InfoHandler(SimpleHTTPRequestHandler):
                 return False
             if version_is_1 and int(entry.get("version", 0)) != 1:
                 return False
+            if version_is_not_1 and int(entry.get("version", 0)) == 1:
+                return False
 
             updated = _parse_updated(str(entry.get("updated", "")))
+            if updated_within_day:
+                if updated is None:
+                    return False
+                if updated.tzinfo is None:
+                    updated = updated.replace(tzinfo=timezone.utc)
+                if now - updated.astimezone(timezone.utc) > timedelta(days=1):
+                    return False
             if updated_within_week:
                 if updated is None:
                     return False
@@ -377,6 +376,32 @@ class InfoHandler(SimpleHTTPRequestHandler):
                 return q in haystack
             return True
 
+        return entry_filter
+
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/ins/run":
+            self._handle_ins_run()
+            return
+        if parsed.path == "/api/remove-entry":
+            self._handle_remove_entry()
+            return
+        if parsed.path == "/api/favored":
+            self._handle_favored()
+            return
+        self._write_json(
+            {"error": "not found"},
+            status=HTTPStatus.NOT_FOUND,
+        )
+
+    def _handle_entries(self, raw_query: str) -> None:
+        query = parse_qs(raw_query)
+        limit = _parse_int(query.get("limit", ["30"])[
+                           0], 30, min_value=1, max_value=200)
+        offset = _parse_int(query.get("offset", ["0"])[
+                            0], 0, min_value=0, max_value=1_000_000)
+        entry_filter = self._build_entry_filter(query)
+
         try:
             with InfoStorage(str(self._db_path)) as storage:
                 all_items = storage.export_entries_json(
@@ -400,12 +425,15 @@ class InfoHandler(SimpleHTTPRequestHandler):
             {"items": items, "total": total, "limit": limit, "offset": offset}
         )
 
-    def _handle_tag_tree(self) -> None:
+    def _handle_tag_tree(self, raw_query: str) -> None:
+        query = parse_qs(raw_query)
+        entry_filter = self._build_entry_filter(query)
         configured_groups = _load_configured_sources(DEFAULT_CONF_PATH)
 
         try:
             with InfoStorage(str(self._db_path)) as storage:
-                all_items = storage.export_entries_json()
+                all_items = storage.export_entries_json(
+                    entry_filter=entry_filter)
         except Exception as exc:
             self._write_json(
                 {"error": f"failed to read database: {exc}"},

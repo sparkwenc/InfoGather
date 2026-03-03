@@ -21,8 +21,10 @@ const treeListEl = document.getElementById("tree-list");
 const clearTagsEl = document.getElementById("clear-tags");
 
 const favoredBtn = document.getElementById("favored-btn");
+const dayBtn = document.getElementById("day-btn");
 const weekBtn = document.getElementById("week-btn");
 const versionBtn = document.getElementById("version-btn");
+const versionNotBtn = document.getElementById("version-not-btn");
 
 function insElements() {
   return { insPanel, insBtn, insText, insPercent, insBar, insLog };
@@ -58,9 +60,31 @@ function renderTree() {
       } else {
         state.selectedSelectors.delete(selector);
       }
-      void fetchEntries({ reset: true });
+      void refreshFilteredView();
     }
   });
+}
+
+function buildFilterParams() {
+  const params = new URLSearchParams({
+    q: qEl.value.trim()
+  });
+  if (state.favoredOnly) params.set("favored", "1");
+  if (state.updatedWithinDay) params.set("updated_within_day", "1");
+  if (state.updatedWithinWeek) params.set("updated_within_week", "1");
+  if (state.versionIs1) params.set("version_is_1", "1");
+  if (state.versionIsNot1) params.set("version_is_not_1", "1");
+  for (const selector of state.selectedSelectors) {
+    params.append("selectors", selector);
+  }
+  return params;
+}
+
+function refreshFilteredView() {
+  void Promise.all([
+    loadTagTree(),
+    fetchEntries({ reset: true })
+  ]);
 }
 
 async function pollInsStatus() {
@@ -142,7 +166,7 @@ async function removeEntry(item, btnEl) {
 
 async function loadTagTree() {
   try {
-    const payload = await api.getTagTree();
+    const payload = await api.getTagTree(buildFilterParams());
     const root = payload.root || { name: "配置源", group_count: 0, source_count: 0, count: 0 };
     treeRootEl.textContent = `${root.name}（${root.group_count} 类 / ${root.source_count} 源 / ${root.count} 条）`;
     state.treeGroups = Array.isArray(payload.groups) ? payload.groups : [];
@@ -155,39 +179,43 @@ async function loadTagTree() {
 }
 
 async function fetchEntries({ reset = false } = {}) {
-  if (state.loading) return;
+  if (state.loading) {
+    if (reset) state.pendingReset = true;
+    return;
+  }
   state.loading = true;
   moreEl.disabled = true;
+  const queryOffset = reset ? 0 : state.offset;
 
-  if (reset) {
-    state.offset = 0;
-    state.total = 0;
-    listEl.innerHTML = "";
-  }
-
-  const params = new URLSearchParams({
-    limit: String(pageSize),
-    offset: String(state.offset),
-    q: qEl.value.trim()
-  });
-
-  if (state.favoredOnly) params.set("favored", "1");
-  if (state.updatedWithinWeek) params.set("updated_within_week", "1");
-  if (state.versionIs1) params.set("version_is_1", "1");
-  for (const selector of state.selectedSelectors) {
-    params.append("selectors", selector);
-  }
+  const params = buildFilterParams();
+  params.set("limit", String(pageSize));
+  params.set("offset", String(queryOffset));
 
   try {
     const payload = await api.getEntries(params);
     const items = Array.isArray(payload.items) ? payload.items : [];
-    state.total = Number(payload.total || 0);
+    const nextTotal = Number(payload.total || 0);
 
-    if (!items.length && state.offset === 0) {
-      const p = document.createElement("p");
-      p.className = "empty";
-      p.textContent = "没有匹配的条目。";
-      listEl.appendChild(p);
+    if (reset) {
+      const fragment = document.createDocumentFragment();
+      if (!items.length) {
+        const p = document.createElement("p");
+        p.className = "empty";
+        p.textContent = "没有匹配的条目。";
+        fragment.appendChild(p);
+      } else {
+        items.forEach((item) => {
+          const card = ui.makeCard(item, {
+            onToggleFavored: updateFavored,
+            onRemove: removeEntry
+          });
+          fragment.appendChild(card);
+          ui.renderMath(card);
+        });
+      }
+      listEl.replaceChildren(fragment);
+      state.offset = items.length;
+      state.total = nextTotal;
     } else {
       items.forEach((item) => {
         const card = ui.makeCard(item, {
@@ -198,15 +226,22 @@ async function fetchEntries({ reset = false } = {}) {
         ui.renderMath(card);
       });
       state.offset += items.length;
+      state.total = nextTotal;
     }
   } catch (err) {
-    listEl.innerHTML = '<p class="empty">读取失败，请确认本地服务已启动。</p>';
+    if (!listEl.children.length) {
+      listEl.innerHTML = '<p class="empty">读取失败，请确认本地服务已启动。</p>';
+    }
     console.error(err);
   } finally {
     ui.setMeta(metaEl, state);
     ui.setMoreVisible(moreEl, state);
     state.loading = false;
     moreEl.disabled = false;
+    if (state.pendingReset) {
+      state.pendingReset = false;
+      void fetchEntries({ reset: true });
+    }
   }
 }
 
@@ -215,35 +250,57 @@ insBtn.addEventListener("click", runIns);
 favoredBtn.addEventListener("click", () => {
   state.favoredOnly = !state.favoredOnly;
   ui.setToggle(favoredBtn, state.favoredOnly);
-  void fetchEntries({ reset: true });
+  refreshFilteredView();
+});
+
+dayBtn.addEventListener("click", () => {
+  state.updatedWithinDay = !state.updatedWithinDay;
+  ui.setToggle(dayBtn, state.updatedWithinDay);
+  refreshFilteredView();
 });
 
 weekBtn.addEventListener("click", () => {
   state.updatedWithinWeek = !state.updatedWithinWeek;
   ui.setToggle(weekBtn, state.updatedWithinWeek);
-  void fetchEntries({ reset: true });
+  refreshFilteredView();
 });
 
 versionBtn.addEventListener("click", () => {
-  state.versionIs1 = !state.versionIs1;
+  const next = !state.versionIs1;
+  state.versionIs1 = next;
+  if (next) {
+    state.versionIsNot1 = false;
+    ui.setToggle(versionNotBtn, false);
+  }
   ui.setToggle(versionBtn, state.versionIs1);
-  void fetchEntries({ reset: true });
+  refreshFilteredView();
+});
+
+versionNotBtn.addEventListener("click", () => {
+  const next = !state.versionIsNot1;
+  state.versionIsNot1 = next;
+  if (next) {
+    state.versionIs1 = false;
+    ui.setToggle(versionBtn, false);
+  }
+  ui.setToggle(versionNotBtn, state.versionIsNot1);
+  refreshFilteredView();
 });
 
 clearTagsEl.addEventListener("click", () => {
   if (!state.selectedSelectors.size) return;
   state.selectedSelectors.clear();
   renderTree();
-  void fetchEntries({ reset: true });
+  refreshFilteredView();
 });
 
 searchEl.addEventListener("click", () => {
-  void fetchEntries({ reset: true });
+  refreshFilteredView();
 });
 
 qEl.addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
-    void fetchEntries({ reset: true });
+    refreshFilteredView();
   }
 });
 
@@ -253,8 +310,10 @@ moreEl.addEventListener("click", () => {
 
 async function bootstrap() {
   ui.setToggle(favoredBtn, false);
+  ui.setToggle(dayBtn, false);
   ui.setToggle(weekBtn, false);
   ui.setToggle(versionBtn, false);
+  ui.setToggle(versionNotBtn, false);
   await pollInsStatus();
   await loadTagTree();
   await fetchEntries({ reset: true });

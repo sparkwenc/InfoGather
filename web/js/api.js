@@ -25,8 +25,10 @@
     return { status: resp.status, payload };
   }
 
-  async function getTagTree() {
-    const resp = await fetch("/api/tag-tree");
+  async function getTagTree(params) {
+    const query = params instanceof URLSearchParams ? params.toString() : new URLSearchParams(params || {}).toString();
+    const suffix = query ? `?${query}` : "";
+    const resp = await fetch(`/api/tag-tree${suffix}`);
     const payload = await parsePayload(resp);
     if (!resp.ok) {
       throw makeHttpError(resp, payload);
