@@ -11,3 +11,4 @@ dependencies = ["feedparser"]
 
 [project.scripts]
 inf = "infogather.cli:main"
+infserve = "infogather.serve:main"

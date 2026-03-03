@@ -81,6 +81,26 @@ class InfoStorage:
         print(
             f"Export result: {len(exported)}/{len(rows)} to {filename} with {entry_filter.__name__}")
 
+    def remove_entry(self, srce_ty: str, srce_id: str) -> int:
+        """Remove one"""
+
+        return self._delete_row(srce_ty, srce_id)
+
+    def export_entries_json(
+        self,
+        entry_filter: Callable[[dict], bool] | None = None,
+    ) -> list[dict]:
+        """Export entries as JSON-friendly dictionaries for read-only interfaces."""
+
+        rows = self._fetch_all()
+        exported = []
+        for row in rows:
+            entry = self._row_to_entry(row)
+            if entry_filter is not None and not entry_filter(entry):
+                continue
+            exported.append(entry)
+        return exported
+
     # internal methods
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is None:
