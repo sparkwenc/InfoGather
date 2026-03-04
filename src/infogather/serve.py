@@ -14,6 +14,7 @@ from functools import partial
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -117,17 +118,21 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _ins_snapshot_unlocked() -> dict:
+    return {
+        "state": INS_JOB["state"],
+        "progress": INS_JOB["progress"],
+        "message": INS_JOB["message"],
+        "started_at": INS_JOB["started_at"],
+        "ended_at": INS_JOB["ended_at"],
+        "returncode": INS_JOB["returncode"],
+        "logs": list(INS_JOB["logs"]),
+    }
+
+
 def _ins_snapshot() -> dict:
     with INS_LOCK:
-        return {
-            "state": INS_JOB["state"],
-            "progress": INS_JOB["progress"],
-            "message": INS_JOB["message"],
-            "started_at": INS_JOB["started_at"],
-            "ended_at": INS_JOB["ended_at"],
-            "returncode": INS_JOB["returncode"],
-            "logs": list(INS_JOB["logs"]),
-        }
+        return _ins_snapshot_unlocked()
 
 
 def _ins_update(**kwargs: object) -> None:
@@ -171,7 +176,7 @@ def _run_ins_job() -> None:
     if DEFAULT_INF_BIN.exists():
         cmd = [str(DEFAULT_INF_BIN), "ins"]
     else:
-        cmd = [sys.executable, "-m", "infogather.main", "ins"]
+        cmd = [sys.executable, "-m", "infogather.cli", "ins"]
         env["PYTHONPATH"] = (
             f"{SRC_DIR}:{env.get('PYTHONPATH', '')}"
             if env.get("PYTHONPATH")
@@ -535,6 +540,65 @@ class InfoHandler(SimpleHTTPRequestHandler):
             return None
         return payload if isinstance(payload, dict) else None
 
+    @staticmethod
+    def _source_key_from_payload(payload: dict) -> tuple[str, str]:
+        srce_ty = str(payload.get("srce_ty", "")).strip()
+        srce_id = str(payload.get("srce_id", "")).strip()
+        return srce_ty, srce_id
+
+    @staticmethod
+    def _binary_value_from_payload(payload: dict, field: str) -> int | None:
+        raw_value = payload.get(field)
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            return None
+        return value if value in (0, 1) else None
+
+    def _handle_entry_mutation(
+        self,
+        payload: dict,
+        *,
+        action_error: str,
+        action: Callable[[InfoStorage, str, str], int],
+        success_count_key: str,
+        success_extra: dict[str, object] | None = None,
+    ) -> None:
+        srce_ty, srce_id = self._source_key_from_payload(payload)
+        if not srce_ty or not srce_id:
+            self._write_json(
+                {"error": "srce_ty and srce_id are required"},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+
+        try:
+            with InfoStorage(str(self._db_path)) as storage:
+                changed = action(storage, srce_ty, srce_id)
+        except Exception as exc:
+            self._write_json(
+                {"error": f"failed to {action_error}: {exc}"},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+            return
+
+        if not changed:
+            self._write_json(
+                {"error": "entry not found"},
+                status=HTTPStatus.NOT_FOUND,
+            )
+            return
+
+        response = {
+            "ok": True,
+            success_count_key: int(changed),
+            "srce_ty": srce_ty,
+            "srce_id": srce_id,
+        }
+        if success_extra:
+            response.update(success_extra)
+        self._write_json(response)
+
     def _handle_favored(self) -> None:
         payload = self._read_json_body()
         if payload is None:
@@ -544,41 +608,22 @@ class InfoHandler(SimpleHTTPRequestHandler):
             )
             return
 
-        srce_ty = str(payload.get("srce_ty", "")).strip()
-        srce_id = str(payload.get("srce_id", "")).strip()
-        favored_raw = payload.get("favored")
-        try:
-            favored = int(favored_raw)
-        except (TypeError, ValueError):
-            favored = -1
-
-        if not srce_ty or not srce_id or favored not in (0, 1):
+        favored = self._binary_value_from_payload(payload, "favored")
+        if favored is None:
             self._write_json(
                 {"error": "srce_ty, srce_id and favored(0/1) are required"},
                 status=HTTPStatus.BAD_REQUEST,
             )
             return
 
-        try:
-            with InfoStorage(str(self._db_path)) as storage:
-                updated = storage.favor_entry(srce_ty, srce_id, favored)
-        except Exception as exc:
-            self._write_json(
-                {"error": f"failed to update favored: {exc}"},
-                status=HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-            return
-
-        if not updated:
-            self._write_json(
-                {"error": "entry not found"},
-                status=HTTPStatus.NOT_FOUND,
-            )
-            return
-
-        self._write_json(
-            {"ok": True, "updated": int(
-                updated), "srce_ty": srce_ty, "srce_id": srce_id, "favored": favored}
+        self._handle_entry_mutation(
+            payload,
+            action_error="update favored",
+            action=lambda storage, srce_ty, srce_id: storage.favor_entry(
+                srce_ty, srce_id, favored
+            ),
+            success_count_key="updated",
+            success_extra={"favored": favored},
         )
 
     def _handle_noticed(self) -> None:
@@ -590,41 +635,22 @@ class InfoHandler(SimpleHTTPRequestHandler):
             )
             return
 
-        srce_ty = str(payload.get("srce_ty", "")).strip()
-        srce_id = str(payload.get("srce_id", "")).strip()
-        noticed_raw = payload.get("noticed")
-        try:
-            noticed = int(noticed_raw)
-        except (TypeError, ValueError):
-            noticed = -1
-
-        if not srce_ty or not srce_id or noticed not in (0, 1):
+        noticed = self._binary_value_from_payload(payload, "noticed")
+        if noticed is None:
             self._write_json(
                 {"error": "srce_ty, srce_id and noticed(0/1) are required"},
                 status=HTTPStatus.BAD_REQUEST,
             )
             return
 
-        try:
-            with InfoStorage(str(self._db_path)) as storage:
-                updated = storage.notice_entry(srce_ty, srce_id, noticed)
-        except Exception as exc:
-            self._write_json(
-                {"error": f"failed to update noticed: {exc}"},
-                status=HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-            return
-
-        if not updated:
-            self._write_json(
-                {"error": "entry not found"},
-                status=HTTPStatus.NOT_FOUND,
-            )
-            return
-
-        self._write_json(
-            {"ok": True, "updated": int(
-                updated), "srce_ty": srce_ty, "srce_id": srce_id, "noticed": noticed}
+        self._handle_entry_mutation(
+            payload,
+            action_error="update noticed",
+            action=lambda storage, srce_ty, srce_id: storage.notice_entry(
+                srce_ty, srce_id, noticed
+            ),
+            success_count_key="updated",
+            success_extra={"noticed": noticed},
         )
 
     def _handle_remove_entry(self) -> None:
@@ -636,35 +662,13 @@ class InfoHandler(SimpleHTTPRequestHandler):
             )
             return
 
-        srce_ty = str(payload.get("srce_ty", "")).strip()
-        srce_id = str(payload.get("srce_id", "")).strip()
-        if not srce_ty or not srce_id:
-            self._write_json(
-                {"error": "srce_ty and srce_id are required"},
-                status=HTTPStatus.BAD_REQUEST,
-            )
-            return
-
-        try:
-            with InfoStorage(str(self._db_path)) as storage:
-                removed = storage.remove_entry(srce_ty, srce_id)
-        except Exception as exc:
-            self._write_json(
-                {"error": f"failed to remove entry: {exc}"},
-                status=HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-            return
-
-        if not removed:
-            self._write_json(
-                {"error": "entry not found"},
-                status=HTTPStatus.NOT_FOUND,
-            )
-            return
-
-        self._write_json(
-            {"ok": True, "removed": int(
-                removed), "srce_ty": srce_ty, "srce_id": srce_id}
+        self._handle_entry_mutation(
+            payload,
+            action_error="remove entry",
+            action=lambda storage, srce_ty, srce_id: storage.remove_entry(
+                srce_ty, srce_id
+            ),
+            success_count_key="removed",
         )
 
     def _handle_ins_status(self) -> None:
@@ -673,15 +677,7 @@ class InfoHandler(SimpleHTTPRequestHandler):
     def _handle_ins_run(self) -> None:
         with INS_LOCK:
             if INS_JOB["state"] == "running":
-                running_snapshot = {
-                    "state": INS_JOB["state"],
-                    "progress": INS_JOB["progress"],
-                    "message": INS_JOB["message"],
-                    "started_at": INS_JOB["started_at"],
-                    "ended_at": INS_JOB["ended_at"],
-                    "returncode": INS_JOB["returncode"],
-                    "logs": list(INS_JOB["logs"]),
-                }
+                running_snapshot = _ins_snapshot_unlocked()
                 self._write_json(
                     {"ok": False, "error": "ins is already running",
                         "job": running_snapshot},

@@ -82,11 +82,45 @@ function buildFilterParams() {
   return params;
 }
 
-function refreshFilteredView() {
-  void Promise.all([
+async function refreshFilteredView() {
+  await Promise.all([
     loadTagTree(),
     fetchEntries({ reset: true })
   ]);
+}
+
+function makeEntryCard(item) {
+  const card = ui.makeCard(item, {
+    onToggleFavored: updateFavored,
+    onToggleNoticed: updateNoticed,
+    onRemove: removeEntry
+  });
+  ui.renderMath(card);
+  return card;
+}
+
+function renderEntries(items, { reset }) {
+  if (reset) {
+    const fragment = document.createDocumentFragment();
+    if (!items.length) {
+      const p = document.createElement("p");
+      p.className = "empty";
+      p.textContent = "没有匹配的条目。";
+      fragment.appendChild(p);
+    } else {
+      items.forEach((item) => {
+        fragment.appendChild(makeEntryCard(item));
+      });
+    }
+    listEl.replaceChildren(fragment);
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  items.forEach((item) => {
+    fragment.appendChild(makeEntryCard(item));
+  });
+  listEl.appendChild(fragment);
 }
 
 async function pollInsStatus() {
@@ -140,7 +174,7 @@ async function updateFavored(item, favored, btnEl) {
   btnEl.disabled = true;
   try {
     await api.setFavored(item.srce_ty, item.srce_id, favored);
-    await fetchEntries({ reset: true });
+    await refreshFilteredView();
   } catch (err) {
     console.error(err);
     window.alert("收藏更新失败，请稍后重试。");
@@ -153,7 +187,7 @@ async function updateNoticed(item, noticed, btnEl) {
   btnEl.disabled = true;
   try {
     await api.setNoticed(item.srce_ty, item.srce_id, noticed);
-    refreshFilteredView();
+    await refreshFilteredView();
   } catch (err) {
     console.error(err);
     window.alert("已读状态更新失败，请稍后重试。");
@@ -169,8 +203,7 @@ async function removeEntry(item, btnEl) {
   btnEl.disabled = true;
   try {
     await api.removeEntry(item.srce_ty, item.srce_id);
-    await loadTagTree();
-    await fetchEntries({ reset: true });
+    await refreshFilteredView();
   } catch (err) {
     console.error(err);
     window.alert("删除失败，请稍后重试。");
@@ -211,37 +244,11 @@ async function fetchEntries({ reset = false } = {}) {
     const items = Array.isArray(payload.items) ? payload.items : [];
     const nextTotal = Number(payload.total || 0);
 
+    renderEntries(items, { reset });
     if (reset) {
-      const fragment = document.createDocumentFragment();
-      if (!items.length) {
-        const p = document.createElement("p");
-        p.className = "empty";
-        p.textContent = "没有匹配的条目。";
-        fragment.appendChild(p);
-      } else {
-        items.forEach((item) => {
-          const card = ui.makeCard(item, {
-            onToggleFavored: updateFavored,
-            onToggleNoticed: updateNoticed,
-            onRemove: removeEntry
-          });
-          fragment.appendChild(card);
-          ui.renderMath(card);
-        });
-      }
-      listEl.replaceChildren(fragment);
       state.offset = items.length;
       state.total = nextTotal;
     } else {
-      items.forEach((item) => {
-        const card = ui.makeCard(item, {
-          onToggleFavored: updateFavored,
-          onToggleNoticed: updateNoticed,
-          onRemove: removeEntry
-        });
-        listEl.appendChild(card);
-        ui.renderMath(card);
-      });
       state.offset += items.length;
       state.total = nextTotal;
     }
@@ -267,27 +274,27 @@ insBtn.addEventListener("click", runIns);
 favoredBtn.addEventListener("click", () => {
   state.favoredOnly = !state.favoredOnly;
   ui.setToggle(favoredBtn, state.favoredOnly);
-  refreshFilteredView();
+  void refreshFilteredView();
 });
 
 if (unnoticedBtn) {
   unnoticedBtn.addEventListener("click", () => {
     state.unnoticedOnly = !state.unnoticedOnly;
     ui.setToggle(unnoticedBtn, state.unnoticedOnly);
-    refreshFilteredView();
+    void refreshFilteredView();
   });
 }
 
 dayBtn.addEventListener("click", () => {
   state.updatedWithinDay = !state.updatedWithinDay;
   ui.setToggle(dayBtn, state.updatedWithinDay);
-  refreshFilteredView();
+  void refreshFilteredView();
 });
 
 weekBtn.addEventListener("click", () => {
   state.updatedWithinWeek = !state.updatedWithinWeek;
   ui.setToggle(weekBtn, state.updatedWithinWeek);
-  refreshFilteredView();
+  void refreshFilteredView();
 });
 
 versionBtn.addEventListener("click", () => {
@@ -298,7 +305,7 @@ versionBtn.addEventListener("click", () => {
     ui.setToggle(versionNotBtn, false);
   }
   ui.setToggle(versionBtn, state.versionIs1);
-  refreshFilteredView();
+  void refreshFilteredView();
 });
 
 versionNotBtn.addEventListener("click", () => {
@@ -309,23 +316,23 @@ versionNotBtn.addEventListener("click", () => {
     ui.setToggle(versionBtn, false);
   }
   ui.setToggle(versionNotBtn, state.versionIsNot1);
-  refreshFilteredView();
+  void refreshFilteredView();
 });
 
 clearTagsEl.addEventListener("click", () => {
   if (!state.selectedSelectors.size) return;
   state.selectedSelectors.clear();
   renderTree();
-  refreshFilteredView();
+  void refreshFilteredView();
 });
 
 searchEl.addEventListener("click", () => {
-  refreshFilteredView();
+  void refreshFilteredView();
 });
 
 qEl.addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
-    refreshFilteredView();
+    void refreshFilteredView();
   }
 });
 

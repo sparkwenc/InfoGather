@@ -73,3 +73,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = _build_parser().parse_args()
     return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

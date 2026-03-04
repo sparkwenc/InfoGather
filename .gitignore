@@ -9,7 +9,8 @@ __pycache__/
 data/
 
 # tests
-test/
+test/*
+!test/*.py
 
 # output
 output/

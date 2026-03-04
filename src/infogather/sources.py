@@ -47,12 +47,33 @@ class InfoSources:
                 feeds[srce_ty].append(feed)
                 inc = len(feed.get("entries", []))
                 tot += inc
+                name = str(item.get("name", "")).strip() or "unknown"
                 print(
-                    f"      {ind + 1:2d}/{cnt:2d}: {inc:3d} from {item["name"]}")
+                    f"      {ind + 1:2d}/{cnt:2d}: {inc:3d} from {name}")
             print(f"      Total: {tot:3d} entries from {cnt} sources")
             tot_f += tot
         print(f"Total: {tot_f:3d} entries from {cnt_f} source types\n")
         return feeds
+
+    @staticmethod
+    def _feed_updated_iso(feed: dict) -> str:
+        feed_meta = feed.get("feed", {})
+        candidates = [
+            feed_meta.get("updated_parsed"),
+            feed_meta.get("published_parsed"),
+        ]
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            try:
+                st = time.struct_time(candidate)
+                return datetime.fromtimestamp(
+                    calendar.timegm(st),
+                    timezone.utc,
+                ).isoformat()
+            except (TypeError, ValueError, OverflowError):
+                continue
+        return datetime.now(timezone.utc).isoformat()
 
     def _normalized_arXiv(self, feeds: list) -> list:
         """normalized arXiv feeds"""
@@ -60,10 +81,7 @@ class InfoSources:
         normalized = []
         for feed in feeds:
             entries = feed.get("entries", [])
-            st = time.struct_time(
-                feed.get("feed", {}).get("updated_parsed", []))
-            dt = datetime.fromtimestamp(
-                calendar.timegm(st), timezone.utc).isoformat()
+            dt = self._feed_updated_iso(feed)
 
             for entry in entries:
                 id, _, ver = entry.get("id").split(":")[-1].rpartition("v")

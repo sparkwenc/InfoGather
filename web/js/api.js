@@ -7,93 +7,80 @@
     return new Error(payload.error || `HTTP ${resp.status}`);
   }
 
-  async function getInsStatus() {
-    const resp = await fetch("/api/ins/status");
-    if (!resp.ok) {
-      const payload = await parsePayload(resp);
+  function buildQuery(params) {
+    if (params instanceof URLSearchParams) return params.toString();
+    return new URLSearchParams(params || {}).toString();
+  }
+
+  async function requestJson(url, options, { allowStatuses = [] } = {}) {
+    const resp = await fetch(url, options);
+    const payload = await parsePayload(resp);
+    if (!resp.ok && !allowStatuses.includes(resp.status)) {
       throw makeHttpError(resp, payload);
     }
-    return await parsePayload(resp);
+    return { resp, payload };
+  }
+
+  async function postJson(url, body) {
+    const { resp, payload } = await requestJson(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    if (!payload.ok) {
+      throw makeHttpError(resp, payload);
+    }
+    return payload;
+  }
+
+  async function getInsStatus() {
+    const { payload } = await requestJson("/api/ins/status");
+    return payload;
   }
 
   async function runIns() {
-    const resp = await fetch("/api/ins/run", { method: "POST" });
-    const payload = await parsePayload(resp);
-    if (!resp.ok && resp.status !== 409) {
-      throw makeHttpError(resp, payload);
-    }
+    const { resp, payload } = await requestJson(
+      "/api/ins/run",
+      { method: "POST" },
+      { allowStatuses: [409] }
+    );
     return { status: resp.status, payload };
   }
 
   async function getTagTree(params) {
-    const query = params instanceof URLSearchParams ? params.toString() : new URLSearchParams(params || {}).toString();
+    const query = buildQuery(params);
     const suffix = query ? `?${query}` : "";
-    const resp = await fetch(`/api/tag-tree${suffix}`);
-    const payload = await parsePayload(resp);
-    if (!resp.ok) {
-      throw makeHttpError(resp, payload);
-    }
+    const { payload } = await requestJson(`/api/tag-tree${suffix}`);
     return payload;
   }
 
   async function getEntries(params) {
-    const query = params instanceof URLSearchParams ? params.toString() : new URLSearchParams(params).toString();
-    const resp = await fetch(`/api/entries?${query}`);
-    const payload = await parsePayload(resp);
-    if (!resp.ok) {
-      throw makeHttpError(resp, payload);
-    }
+    const query = buildQuery(params);
+    const { payload } = await requestJson(`/api/entries?${query}`);
     return payload;
   }
 
   async function setFavored(srceTy, srceId, favored) {
-    const resp = await fetch("/api/favored", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        srce_ty: srceTy,
-        srce_id: srceId,
-        favored: favored
-      })
+    return await postJson("/api/favored", {
+      srce_ty: srceTy,
+      srce_id: srceId,
+      favored: favored
     });
-    const payload = await parsePayload(resp);
-    if (!resp.ok || !payload.ok) {
-      throw makeHttpError(resp, payload);
-    }
-    return payload;
   }
 
   async function setNoticed(srceTy, srceId, noticed) {
-    const resp = await fetch("/api/noticed", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        srce_ty: srceTy,
-        srce_id: srceId,
-        noticed: noticed
-      })
+    return await postJson("/api/noticed", {
+      srce_ty: srceTy,
+      srce_id: srceId,
+      noticed: noticed
     });
-    const payload = await parsePayload(resp);
-    if (!resp.ok || !payload.ok) {
-      throw makeHttpError(resp, payload);
-    }
-    return payload;
   }
 
   async function removeEntry(srceTy, srceId) {
-    const resp = await fetch("/api/remove-entry", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        srce_ty: srceTy,
-        srce_id: srceId
-      })
+    return await postJson("/api/remove-entry", {
+      srce_ty: srceTy,
+      srce_id: srceId
     });
-    const payload = await parsePayload(resp);
-    if (!resp.ok || !payload.ok) {
-      throw makeHttpError(resp, payload);
-    }
-    return payload;
   }
 
   global.InfoAPI = {
