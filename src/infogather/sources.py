@@ -1,4 +1,5 @@
 import time
+import http.client
 import feedparser
 import calendar
 from datetime import datetime, timezone
@@ -43,17 +44,33 @@ class InfoSources:
             print(
                 f"{ind_f + 1:2d}/{cnt_f:2d}-{srce_ty:5s}: Fetching from {cnt} sources...")
             for ind, item in enumerate(lists):
-                feed = feedparser.parse(item["url"])
+                name = str(item.get("name", "")).strip() or "unknown"
+                feed = self._fetch_feed(item["url"], name)
                 feeds[srce_ty].append(feed)
                 inc = len(feed.get("entries", []))
                 tot += inc
-                name = str(item.get("name", "")).strip() or "unknown"
                 print(
                     f"      {ind + 1:2d}/{cnt:2d}: {inc:3d} from {name}")
             print(f"      Total: {tot:3d} entries from {cnt} sources")
             tot_f += tot
         print(f"Total: {tot_f:3d} entries from {cnt_f} source types\n")
         return feeds
+
+    @staticmethod
+    def _fetch_feed(url: str, name: str, attempts: int = 3, delay: float = 1.0) -> dict:
+        for attempt in range(1, attempts + 1):
+            try:
+                return feedparser.parse(url)
+            except http.client.IncompleteRead as exc:
+                if attempt >= attempts:
+                    raise
+                print(
+                    f"      {name}: incomplete response "
+                    f"({len(exc.partial)} bytes read, {exc.expected} more expected), "
+                    f"retrying {attempt + 1}/{attempts}")
+                time.sleep(delay)
+
+        raise RuntimeError("unreachable feed fetch state")
 
     @staticmethod
     def _feed_updated_iso(feed: dict) -> str:
