@@ -1,15 +1,13 @@
 import tomllib
 import argparse
-from pathlib import Path
 
 from .sources import InfoSources
 from .storage import InfoStorage
 from .filters import InfoFilters
+from .paths import DEFAULT_CONFIG_PATH, DEFAULT_DB_PATH, DEFAULT_OUTPUT_PATH
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_DB_PATH = PROJECT_ROOT / "data/entries.db"
-DEFAULT_CONFIG = PROJECT_ROOT / "conf/config.toml"
-DEFAULT_OUTPUT = PROJECT_ROOT / "output/feeds.md"
+DEFAULT_CONFIG = DEFAULT_CONFIG_PATH
+DEFAULT_OUTPUT = DEFAULT_OUTPUT_PATH
 
 
 def _cmd_ins(args: argparse.Namespace) -> int:

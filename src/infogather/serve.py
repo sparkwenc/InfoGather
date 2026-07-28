@@ -1,4 +1,6 @@
 from .storage import InfoStorage
+from .filters import parse_updated, updated_within
+from .paths import DEFAULT_CONFIG_PATH, DEFAULT_DB_PATH, WEB_DIR
 
 import argparse
 import json
@@ -17,12 +19,7 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-SRC_DIR = PROJECT_ROOT / "src"
-WEB_DIR = PROJECT_ROOT / "web"
-DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "entries.db"
-DEFAULT_CONF_PATH = PROJECT_ROOT / "conf" / "config.toml"
-DEFAULT_INF_BIN = PROJECT_ROOT / ".venv" / "bin" / "inf"
+DEFAULT_CONF_PATH = DEFAULT_CONFIG_PATH
 
 FETCH_PROGRESS_RE = re.compile(r"^\s*(\d+)\s*/\s*(\d+)-")
 
@@ -86,21 +83,10 @@ def _parse_selectors(values: list[str]) -> tuple[set[str], set[str]]:
     return tag_values, source_types
 
 
-def _parse_updated(value: str) -> datetime | None:
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-
 def _updated_timestamp(value: str) -> float:
-    dt = _parse_updated(value)
+    dt = parse_updated(value)
     if dt is None:
         return float("-inf")
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
     return dt.timestamp()
 
 
@@ -170,24 +156,19 @@ def _ins_progress_from_line(line: str, current: int) -> tuple[int, str]:
     return current, "处理中"
 
 
-def _run_ins_job() -> None:
+def _run_ins_job(db_path: str | Path, conf_path: Path) -> None:
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
-    if DEFAULT_INF_BIN.exists():
-        cmd = [str(DEFAULT_INF_BIN), "ins"]
-    else:
-        cmd = [sys.executable, "-m", "infogather.cli", "ins"]
-        env["PYTHONPATH"] = (
-            f"{SRC_DIR}:{env.get('PYTHONPATH', '')}"
-            if env.get("PYTHONPATH")
-            else str(SRC_DIR)
-        )
+    cmd = [sys.executable, "-m", "infogather.cli"]
+    cmd.extend([
+        "--db-path", str(db_path),
+        "ins", "--conf", str(conf_path),
+    ])
     _ins_append_log(f"$ {' '.join(cmd)}")
 
     try:
         proc = subprocess.Popen(
             cmd,
-            cwd=str(PROJECT_ROOT),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -237,11 +218,8 @@ def _run_ins_job() -> None:
 def _load_configured_sources(conf_path: Path) -> list[dict]:
     if not conf_path.exists():
         return []
-    try:
-        with conf_path.open("rb") as f:
-            conf = tomllib.load(f)
-    except Exception:
-        return []
+    with conf_path.open("rb") as f:
+        conf = tomllib.load(f)
 
     groups: list[dict] = []
     for srce_ty, raw_sources in conf.items():
@@ -289,9 +267,22 @@ def _load_configured_sources(conf_path: Path) -> list[dict]:
     return groups
 
 
+def _normalize_db_path(raw_path: str) -> str | Path:
+    if raw_path.startswith("file:"):
+        return raw_path
+    return Path(raw_path).expanduser().resolve()
+
+
 class InfoHandler(SimpleHTTPRequestHandler):
-    def __init__(self, *args, db_path: Path, **kwargs) -> None:
+    def __init__(
+        self,
+        *args,
+        db_path: str | Path,
+        conf_path: Path,
+        **kwargs,
+    ) -> None:
         self._db_path = db_path
+        self._conf_path = conf_path
         super().__init__(*args, directory=str(WEB_DIR), **kwargs)
 
     def end_headers(self) -> None:
@@ -346,21 +337,14 @@ class InfoHandler(SimpleHTTPRequestHandler):
             if version_is_not_1 and int(entry.get("version", 0)) == 1:
                 return False
 
-            updated = _parse_updated(str(entry.get("updated", "")))
-            if updated_within_day:
-                if updated is None:
-                    return False
-                if updated.tzinfo is None:
-                    updated = updated.replace(tzinfo=timezone.utc)
-                if now - updated.astimezone(timezone.utc) > timedelta(days=1):
-                    return False
-            if updated_within_week:
-                if updated is None:
-                    return False
-                if updated.tzinfo is None:
-                    updated = updated.replace(tzinfo=timezone.utc)
-                if now - updated.astimezone(timezone.utc) > timedelta(days=7):
-                    return False
+            if updated_within_day and not updated_within(
+                entry.get("updated"), timedelta(days=1), now=now
+            ):
+                return False
+            if updated_within_week and not updated_within(
+                entry.get("updated"), timedelta(days=7), now=now
+            ):
+                return False
 
             content = entry.get("content", {})
             if selected_tags or selected_source_types:
@@ -439,9 +423,9 @@ class InfoHandler(SimpleHTTPRequestHandler):
     def _handle_tag_tree(self, raw_query: str) -> None:
         query = parse_qs(raw_query)
         entry_filter = self._build_entry_filter(query)
-        configured_groups = _load_configured_sources(DEFAULT_CONF_PATH)
 
         try:
+            configured_groups = _load_configured_sources(self._conf_path)
             with InfoStorage(str(self._db_path)) as storage:
                 all_items = storage.export_entries_json(
                     entry_filter=entry_filter)
@@ -549,11 +533,13 @@ class InfoHandler(SimpleHTTPRequestHandler):
     @staticmethod
     def _binary_value_from_payload(payload: dict, field: str) -> int | None:
         raw_value = payload.get(field)
-        try:
-            value = int(raw_value)
-        except (TypeError, ValueError):
+        if isinstance(raw_value, bool):
             return None
-        return value if value in (0, 1) else None
+        if isinstance(raw_value, int) and raw_value in (0, 1):
+            return raw_value
+        if isinstance(raw_value, str) and raw_value in ("0", "1"):
+            return int(raw_value)
+        return None
 
     def _handle_entry_mutation(
         self,
@@ -693,7 +679,11 @@ class InfoHandler(SimpleHTTPRequestHandler):
             INS_JOB["returncode"] = None
             INS_JOB["logs"] = []
 
-        worker = threading.Thread(target=_run_ins_job, daemon=True)
+        worker = threading.Thread(
+            target=_run_ins_job,
+            args=(self._db_path, self._conf_path),
+            daemon=True,
+        )
         worker.start()
         self._write_json({"ok": True, "job": _ins_snapshot()})
 
@@ -708,16 +698,21 @@ class InfoHandler(SimpleHTTPRequestHandler):
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Serve local web UI and read-only DB API.")
+        description="Serve the local web UI and database API.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--db-path", default=str(DEFAULT_DB_PATH))
+    parser.add_argument("--conf", default=str(DEFAULT_CONF_PATH))
     args = parser.parse_args()
 
-    db_path = Path(args.db_path).expanduser().resolve()
-    handler = partial(InfoHandler, db_path=db_path)
+    db_path = _normalize_db_path(args.db_path)
+    conf_path = Path(args.conf).expanduser().resolve()
+    handler = partial(InfoHandler, db_path=db_path, conf_path=conf_path)
     server = ThreadingHTTPServer((args.host, args.port), handler)
-    print(f"Serving on http://{args.host}:{args.port} (db: {db_path})")
+    print(
+        f"Serving on http://{args.host}:{args.port} "
+        f"(db: {db_path}, conf: {conf_path})"
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

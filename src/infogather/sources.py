@@ -2,7 +2,9 @@ import time
 import http.client
 import feedparser
 import calendar
+import re
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 
 class InfoSources:
@@ -58,9 +60,12 @@ class InfoSources:
 
     @staticmethod
     def _fetch_feed(url: str, name: str, attempts: int = 3, delay: float = 1.0) -> dict:
+        if attempts < 1:
+            raise ValueError("attempts must be at least 1")
+
         for attempt in range(1, attempts + 1):
             try:
-                return feedparser.parse(url)
+                feed = feedparser.parse(url)
             except http.client.IncompleteRead as exc:
                 if attempt >= attempts:
                     raise
@@ -69,6 +74,25 @@ class InfoSources:
                     f"({len(exc.partial)} bytes read, {exc.expected} more expected), "
                     f"retrying {attempt + 1}/{attempts}")
                 time.sleep(delay)
+                continue
+
+            status = feed.get("status")
+            if isinstance(status, int) and status >= 400:
+                error = RuntimeError(
+                    f"{name}: feed request failed with HTTP {status}"
+                )
+            elif feed.get("bozo"):
+                detail = feed.get("bozo_exception", "parse error")
+                error = RuntimeError(f"{name}: invalid feed: {detail}")
+            else:
+                return feed
+
+            if attempt >= attempts:
+                raise error
+            print(
+                f"      {error}, retrying {attempt + 1}/{attempts}"
+            )
+            time.sleep(delay)
 
         raise RuntimeError("unreachable feed fetch state")
 
@@ -101,14 +125,32 @@ class InfoSources:
             dt = self._feed_updated_iso(feed)
 
             for entry in entries:
-                id, _, ver = entry.get("id").split(":")[-1].rpartition("v")
-                _, _, abstract = entry.get("summary").partition("\nAbstract: ")
-                tags = [tag.get("term") for tag in entry.get("tags", [])]
+                try:
+                    srce_id, version = self._parse_arxiv_id(entry.get("id"))
+                except (TypeError, ValueError) as exc:
+                    print(f"arXiv: malformed entry skipped: {exc}")
+                    continue
+
+                summary = str(entry.get("summary") or "").strip()
+                parts = re.split(
+                    r"(?:^|\r?\n)\s*Abstract:\s*",
+                    summary,
+                    maxsplit=1,
+                    flags=re.IGNORECASE,
+                )
+                abstract = parts[-1].strip()
+                tags = []
+                for tag in entry.get("tags", []) or []:
+                    if not isinstance(tag, dict):
+                        continue
+                    term = tag.get("term")
+                    if isinstance(term, str) and term.strip():
+                        tags.append(term.strip())
 
                 normalized.append({
                     "srce_ty": "arXiv",
-                    "srce_id": id,
-                    "version": int(ver),
+                    "srce_id": srce_id,
+                    "version": version,
                     "favored": 0,
                     "noticed": 0,
                     "updated": dt,
@@ -122,6 +164,29 @@ class InfoSources:
                 })
         return normalized
 
-    def _normalized_AMS(self, feeds: list) -> list:
-        # TODO: implement AMS normalization
-        return []
+    @staticmethod
+    def _parse_arxiv_id(raw_id: object) -> tuple[str, int]:
+        if not isinstance(raw_id, str) or not raw_id.strip():
+            raise ValueError("missing arXiv id")
+
+        value = raw_id.strip()
+        parsed = urlparse(value)
+        if parsed.scheme and parsed.netloc:
+            value = parsed.path
+        elif value.lower().startswith("oai:"):
+            value = value.rsplit(":", 1)[-1]
+        elif value.lower().startswith("arxiv:"):
+            value = value.split(":", 1)[-1]
+
+        value = value.strip("/")
+        for prefix in ("abs/", "pdf/"):
+            if value.lower().startswith(prefix):
+                value = value[len(prefix):]
+                break
+        if value.lower().endswith(".pdf"):
+            value = value[:-4]
+
+        srce_id, separator, raw_version = value.rpartition("v")
+        if not separator or not srce_id or not raw_version.isdigit():
+            raise ValueError(f"invalid arXiv id: {raw_id!r}")
+        return srce_id, int(raw_version)

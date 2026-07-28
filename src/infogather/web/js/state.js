@@ -5,6 +5,8 @@
       total: 0,
       loading: false,
       pendingReset: false,
+      entriesGeneration: 0,
+      treeGeneration: 0,
       selectedSelectors: new Set(),
       favoredOnly: false,
       unnoticedOnly: false,

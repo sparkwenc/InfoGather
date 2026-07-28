@@ -1,14 +1,18 @@
 [build-system]
-requires = ["uv_build>=0.4.0"]
+requires = ["uv_build>=0.4.0,<0.12"]
 build-backend = "uv_build"
 
 [project]
 name = "infogather"
 version = "0.1.0"
-description = "CLI tool for info garthering and management"
+description = "CLI tool for information gathering and management"
+readme = "README.md"
 requires-python = ">=3.13"
 dependencies = ["feedparser"]
 
 [project.scripts]
 inf = "infogather.cli:main"
 infserve = "infogather.serve:main"
+
+[tool.uv.build-backend]
+source-exclude = ["**/.DS_Store"]

@@ -113,7 +113,7 @@
     const delBtn = document.createElement("button");
     delBtn.type = "button";
     delBtn.className = "del-btn";
-    delBtn.textContent = "删除";
+    delBtn.textContent = "移除";
     delBtn.addEventListener("click", async () => {
       await handlers.onRemove(item, delBtn);
     });

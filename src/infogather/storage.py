@@ -1,15 +1,28 @@
 import json
 import sqlite3
+from pathlib import Path
 from typing import Callable
 
 
 class InfoStorage:
     # resource management
-    def __init__(self, db_path: str) -> None:
-        self._db_path = db_path
-        self._conn = sqlite3.connect(db_path)
+    def __init__(self, db_path: str | Path) -> None:
+        raw_path = str(db_path)
+        is_uri = raw_path.startswith("file:")
+        if raw_path == ":memory:" or is_uri:
+            resolved_path = raw_path
+        else:
+            path = Path(raw_path).expanduser()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            resolved_path = str(path)
+        self._db_path = resolved_path
+        self._conn = sqlite3.connect(resolved_path, uri=is_uri)
         self._conn.row_factory = sqlite3.Row
-        self._init_schema()
+        try:
+            self._init_schema()
+        except Exception:
+            self.close()
+            raise
 
     def close(self) -> None:
         if self._conn is None:
@@ -29,8 +42,7 @@ class InfoStorage:
         """Insert entries."""
 
         tot_cnt = len(entries)
-        ins_cnt = 0
-        upd_cnt = 0
+        changed_cnt = 0
 
         for entry in entries:
             srce_ty = entry["srce_ty"]
@@ -41,22 +53,19 @@ class InfoStorage:
             updated = entry["updated"]
             content = json.dumps(entry["content"], ensure_ascii=False)
 
-            existing = self._fetch_one(srce_ty, srce_id)
-            if existing is None:
-                self._insert_row(srce_ty, srce_id,
-                                 version, favored, noticed, updated, content)
-                ins_cnt += 1
-                continue
-
-            if self._is_same(existing, version):
-                continue
-
-            self._update_row(srce_ty, srce_id,
-                             version=version, noticed=0, updated=updated, content=content)
-            upd_cnt += 1
+            changed = self._upsert_row(
+                srce_ty,
+                srce_id,
+                version,
+                favored,
+                noticed,
+                updated,
+                content,
+            )
+            changed_cnt += changed
 
         print(
-            f"Insert result: {ins_cnt}/{tot_cnt} inserted, {upd_cnt}/{tot_cnt} updated")
+            f"Insert result: {changed_cnt}/{tot_cnt} inserted or updated")
 
     def favor_entry(self, srce_ty: str, srce_id: str, favored: int) -> int:
         """Update favored status for one entry"""
@@ -73,19 +82,19 @@ class InfoStorage:
 
         return self._delete_row(srce_ty, srce_id)
 
-    def export_entries(self, filename: str, entry_filter: Callable[[dict], bool]) -> None:
+    def export_entries(
+        self,
+        filename: str | Path,
+        entry_filter: Callable[[dict], bool],
+    ) -> None:
         """export all entries passing the filter to a markdown file"""
 
-        rows = self._fetch_all()
-        exported = []
-        for row in rows:
-            entry = self._row_to_entry(row)
-            if entry_filter(entry):
-                exported.append(entry)
+        entries = self.export_entries_json()
+        exported = [entry for entry in entries if entry_filter(entry)]
         self._write_to_markdown(filename, exported)
 
         print(
-            f"Export result: {len(exported)}/{len(rows)} to {filename} with {entry_filter.__name__}")
+            f"Export result: {len(exported)}/{len(entries)} to {filename} with {entry_filter.__name__}")
 
     def export_entries_json(
         self,
@@ -93,14 +102,10 @@ class InfoStorage:
     ) -> list[dict]:
         """Export entries as JSON-friendly dictionaries for read-only interfaces."""
 
-        rows = self._fetch_all()
-        exported = []
-        for row in rows:
-            entry = self._row_to_entry(row)
-            if entry_filter is not None and not entry_filter(entry):
-                continue
-            exported.append(entry)
-        return exported
+        entries = [self._row_to_entry(row) for row in self._fetch_all()]
+        if entry_filter is None:
+            return entries
+        return [entry for entry in entries if entry_filter(entry)]
 
     # internal methods
     def _get_conn(self) -> sqlite3.Connection:
@@ -109,7 +114,29 @@ class InfoStorage:
         return self._conn
 
     def _init_schema(self) -> None:
-        with self._get_conn() as conn:
+        conn = self._get_conn()
+        required_indexes = {
+            "idx_entries_favored",
+            "idx_entries_noticed",
+            "idx_entries_updated",
+        }
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(tab_entries)")
+        }
+        indexes = {
+            row["name"]
+            for row in conn.execute("PRAGMA index_list(tab_entries)")
+        }
+        if "noticed" in columns and required_indexes.issubset(indexes):
+            return
+
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(tab_entries)")
+            }
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS tab_entries (
@@ -124,6 +151,15 @@ class InfoStorage:
                 )
                 """
             )
+            columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(tab_entries)")
+            }
+            if "noticed" not in columns:
+                conn.execute(
+                    "ALTER TABLE tab_entries "
+                    "ADD COLUMN noticed INTEGER NOT NULL DEFAULT 0"
+                )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_entries_favored ON tab_entries(favored)"
             )
@@ -133,18 +169,10 @@ class InfoStorage:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_entries_updated ON tab_entries(updated)"
             )
-
-    def _fetch_one(self, srce_ty: str, srce_id: str) -> sqlite3.Row | None:
-        with self._get_conn() as conn:
-            cur = conn.execute(
-                """
-                SELECT version
-                FROM tab_entries
-                WHERE srce_ty = ? AND srce_id = ?
-                """,
-                (srce_ty, srce_id),
-            )
-        return cur.fetchone()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
     def _fetch_all(self) -> list[sqlite3.Row]:
         with self._get_conn() as conn:
@@ -157,7 +185,7 @@ class InfoStorage:
             )
         return cur.fetchall()
 
-    def _insert_row(self, srce_ty: str, srce_id: str,
+    def _upsert_row(self, srce_ty: str, srce_id: str,
                     version: int, favored: int, noticed: int, updated: str, content: str
                     ) -> int:
         with self._get_conn() as conn:
@@ -165,6 +193,12 @@ class InfoStorage:
                 """
                 INSERT INTO tab_entries (srce_ty, srce_id, version, favored, noticed, updated, content)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(srce_ty, srce_id) DO UPDATE SET
+                    version = excluded.version,
+                    noticed = 0,
+                    updated = excluded.updated,
+                    content = excluded.content
+                WHERE excluded.version > tab_entries.version
                 """,
                 (srce_ty, srce_id, version, favored, noticed, updated, content),
             )
@@ -216,10 +250,6 @@ class InfoStorage:
 
     # helper methods
     @staticmethod
-    def _is_same(existing: sqlite3.Row, version: int) -> bool:
-        return existing["version"] == version
-
-    @staticmethod
     def _row_to_entry(row: sqlite3.Row) -> dict:
         return {
             "srce_ty": row["srce_ty"],
@@ -232,8 +262,10 @@ class InfoStorage:
         }
 
     @staticmethod
-    def _write_to_markdown(filename: str, exported: list[dict]) -> None:
-        with open(filename, "w", encoding="utf-8") as f:
+    def _write_to_markdown(filename: str | Path, exported: list[dict]) -> None:
+        path = Path(filename).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
             for entry in exported:
                 f.write(f"## {entry['srce_ty']}:{entry['srce_id']}\n\n")
                 f.write(f"- **Version:** {entry['version']}\n")

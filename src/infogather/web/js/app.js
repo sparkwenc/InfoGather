@@ -197,7 +197,9 @@ async function updateNoticed(item, noticed, btnEl) {
 }
 
 async function removeEntry(item, btnEl) {
-  const ok = window.confirm(`确认删除 ${item.srce_ty}:${item.srce_id} ?`);
+  const ok = window.confirm(
+    `确认从本地列表移除 ${item.srce_ty}:${item.srce_id}？再次拉取时可能恢复。`
+  );
   if (!ok) return;
 
   btnEl.disabled = true;
@@ -206,20 +208,23 @@ async function removeEntry(item, btnEl) {
     await refreshFilteredView();
   } catch (err) {
     console.error(err);
-    window.alert("删除失败，请稍后重试。");
+    window.alert("移除失败，请稍后重试。");
   } finally {
     btnEl.disabled = false;
   }
 }
 
 async function loadTagTree() {
+  const generation = ++state.treeGeneration;
   try {
     const payload = await api.getTagTree(buildFilterParams());
+    if (generation !== state.treeGeneration) return;
     const root = payload.root || { name: "配置源", group_count: 0, source_count: 0, count: 0 };
     treeRootEl.textContent = `${root.name}（${root.group_count} 类 / ${root.source_count} 源 / ${root.count} 条）`;
     state.treeGroups = Array.isArray(payload.groups) ? payload.groups : [];
     renderTree();
   } catch (err) {
+    if (generation !== state.treeGeneration) return;
     treeRootEl.textContent = "配置源 (加载失败)";
     treeListEl.innerHTML = '<li class="tree-item"><label>无法读取源列表</label></li>';
     console.error(err);
@@ -227,6 +232,8 @@ async function loadTagTree() {
 }
 
 async function fetchEntries({ reset = false } = {}) {
+  if (reset) state.entriesGeneration += 1;
+  const generation = state.entriesGeneration;
   if (state.loading) {
     if (reset) state.pendingReset = true;
     return;
@@ -241,6 +248,7 @@ async function fetchEntries({ reset = false } = {}) {
 
   try {
     const payload = await api.getEntries(params);
+    if (generation !== state.entriesGeneration) return;
     const items = Array.isArray(payload.items) ? payload.items : [];
     const nextTotal = Number(payload.total || 0);
 
@@ -253,7 +261,10 @@ async function fetchEntries({ reset = false } = {}) {
       state.total = nextTotal;
     }
   } catch (err) {
-    if (!listEl.children.length) {
+    if (generation !== state.entriesGeneration) return;
+    if (reset || !listEl.children.length) {
+      state.offset = 0;
+      state.total = 0;
       listEl.innerHTML = '<p class="empty">读取失败，请确认本地服务已启动。</p>';
     }
     console.error(err);
