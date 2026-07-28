@@ -77,10 +77,74 @@ class InfoStorage:
 
         return self._update_row(srce_ty, srce_id, noticed=noticed)
 
+    def favor_entry_if_current(
+        self,
+        srce_ty: str,
+        srce_id: str,
+        expected: int,
+        expected_revision: int,
+        favored: int,
+    ) -> int:
+        return self._update_flag_if_current(
+            srce_ty, srce_id, "favored", expected, expected_revision, favored
+        )
+
+    def notice_entry_if_current(
+        self,
+        srce_ty: str,
+        srce_id: str,
+        expected: int,
+        expected_revision: int,
+        noticed: int,
+    ) -> int:
+        return self._update_flag_if_current(
+            srce_ty, srce_id, "noticed", expected, expected_revision, noticed
+        )
+
     def remove_entry(self, srce_ty: str, srce_id: str) -> int:
         """Remove one entry"""
 
         return self._delete_row(srce_ty, srce_id)
+
+    def pop_entry(self, srce_ty: str, srce_id: str) -> dict | None:
+        """Remove and return one entry atomically."""
+
+        conn = self._get_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cur = conn.execute(
+                """
+                DELETE FROM tab_entries
+                WHERE srce_ty = ? AND srce_id = ?
+                RETURNING
+                    srce_ty, srce_id, version, favored, noticed,
+                    state_rev, updated, content
+                """,
+                (srce_ty, srce_id),
+            )
+            row = cur.fetchone()
+            entry = None if row is None else self._row_to_entry(row)
+            if entry is not None:
+                entry["state_rev"] += 1
+            conn.commit()
+            return entry
+        except Exception:
+            conn.rollback()
+            raise
+
+    def restore_entry(self, entry: dict) -> int:
+        """Restore a removed entry unless it has already been reinserted."""
+
+        return self._restore_row(
+            entry["srce_ty"],
+            entry["srce_id"],
+            entry["version"],
+            entry["favored"],
+            entry["noticed"],
+            entry["state_rev"],
+            entry["updated"],
+            json.dumps(entry["content"], ensure_ascii=False),
+        )
 
     def export_entries(
         self,
@@ -128,7 +192,10 @@ class InfoStorage:
             row["name"]
             for row in conn.execute("PRAGMA index_list(tab_entries)")
         }
-        if "noticed" in columns and required_indexes.issubset(indexes):
+        if (
+            {"noticed", "state_rev"}.issubset(columns)
+            and required_indexes.issubset(indexes)
+        ):
             return
 
         try:
@@ -145,6 +212,7 @@ class InfoStorage:
                     version INTEGER NOT NULL DEFAULT 1,
                     favored INTEGER NOT NULL DEFAULT 0,
                     noticed INTEGER NOT NULL DEFAULT 0,
+                    state_rev INTEGER NOT NULL DEFAULT 0,
                     updated TEXT NOT NULL,
                     content TEXT NOT NULL,
                     PRIMARY KEY (srce_ty, srce_id)
@@ -159,6 +227,11 @@ class InfoStorage:
                 conn.execute(
                     "ALTER TABLE tab_entries "
                     "ADD COLUMN noticed INTEGER NOT NULL DEFAULT 0"
+                )
+            if "state_rev" not in columns:
+                conn.execute(
+                    "ALTER TABLE tab_entries "
+                    "ADD COLUMN state_rev INTEGER NOT NULL DEFAULT 0"
                 )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_entries_favored ON tab_entries(favored)"
@@ -178,7 +251,7 @@ class InfoStorage:
         with self._get_conn() as conn:
             cur = conn.execute(
                 """
-                SELECT srce_ty, srce_id, version, favored, noticed, updated, content
+                SELECT srce_ty, srce_id, version, favored, noticed, state_rev, updated, content
                 FROM tab_entries
                 ORDER BY srce_ty, srce_id
                 """
@@ -191,11 +264,14 @@ class InfoStorage:
         with self._get_conn() as conn:
             cur = conn.execute(
                 """
-                INSERT INTO tab_entries (srce_ty, srce_id, version, favored, noticed, updated, content)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO tab_entries (
+                    srce_ty, srce_id, version, favored, noticed, state_rev, updated, content
+                )
+                VALUES (?, ?, ?, ?, ?, 0, ?, ?)
                 ON CONFLICT(srce_ty, srce_id) DO UPDATE SET
                     version = excluded.version,
                     noticed = 0,
+                    state_rev = tab_entries.state_rev + 1,
                     updated = excluded.updated,
                     content = excluded.content
                 WHERE excluded.version > tab_entries.version
@@ -228,6 +304,8 @@ class InfoStorage:
         if content is not None:
             sets.append("content = ?")
             pars.append(content)
+        if favored is not None or noticed is not None:
+            sets.append("state_rev = state_rev + 1")
 
         if not sets:
             return 0
@@ -248,6 +326,49 @@ class InfoStorage:
             )
         return cur.rowcount
 
+    def _update_flag_if_current(
+        self,
+        srce_ty: str,
+        srce_id: str,
+        column: str,
+        expected: int,
+        expected_revision: int,
+        value: int,
+    ) -> int:
+        if column not in {"favored", "noticed"}:
+            raise ValueError(f"unsupported flag column: {column}")
+        with self._get_conn() as conn:
+            cur = conn.execute(
+                f"""
+                UPDATE tab_entries
+                SET {column} = ?, state_rev = state_rev + 1
+                WHERE srce_ty = ? AND srce_id = ?
+                    AND {column} = ? AND state_rev = ?
+                """,
+                (value, srce_ty, srce_id, expected, expected_revision),
+            )
+        return cur.rowcount
+
+    def _restore_row(self, srce_ty: str, srce_id: str,
+                     version: int, favored: int, noticed: int, state_rev: int,
+                     updated: str, content: str
+                     ) -> int:
+        with self._get_conn() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO tab_entries (
+                    srce_ty, srce_id, version, favored, noticed, state_rev, updated, content
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(srce_ty, srce_id) DO NOTHING
+                """,
+                (
+                    srce_ty, srce_id, version, favored, noticed,
+                    state_rev, updated, content,
+                ),
+            )
+        return cur.rowcount
+
     # helper methods
     @staticmethod
     def _row_to_entry(row: sqlite3.Row) -> dict:
@@ -257,6 +378,7 @@ class InfoStorage:
             "version": row["version"],
             "favored": row["favored"],
             "noticed": row["noticed"],
+            "state_rev": row["state_rev"],
             "updated": row["updated"],
             "content": json.loads(row["content"]),
         }

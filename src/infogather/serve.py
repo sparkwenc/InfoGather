@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import threading
@@ -33,6 +34,8 @@ INS_JOB = {
     "returncode": None,
     "logs": [],
 }
+REMOVE_UNDO_LOCK = threading.Lock()
+REMOVE_UNDO = {"token": None, "entry": None}
 
 
 def _parse_int(raw: str, default: int, *, min_value: int, max_value: int) -> int:
@@ -131,6 +134,12 @@ def _ins_append_log(line: str) -> None:
         INS_JOB["logs"].append(line)
         if len(INS_JOB["logs"]) > 120:
             INS_JOB["logs"] = INS_JOB["logs"][-120:]
+
+
+def _clear_removed_entry() -> None:
+    with REMOVE_UNDO_LOCK:
+        REMOVE_UNDO["token"] = None
+        REMOVE_UNDO["entry"] = None
 
 
 def _ins_progress_from_line(line: str, current: int) -> tuple[int, str]:
@@ -378,6 +387,9 @@ class InfoHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/remove-entry":
             self._handle_remove_entry()
             return
+        if parsed.path == "/api/restore-entry":
+            self._handle_restore_entry()
+            return
         if parsed.path == "/api/favored":
             self._handle_favored()
             return
@@ -541,6 +553,13 @@ class InfoHandler(SimpleHTTPRequestHandler):
             return int(raw_value)
         return None
 
+    @staticmethod
+    def _revision_from_payload(payload: dict) -> int | None:
+        revision = payload.get("expected_revision")
+        if isinstance(revision, bool) or not isinstance(revision, int):
+            return None
+        return revision if revision >= 0 else None
+
     def _handle_entry_mutation(
         self,
         payload: dict,
@@ -549,6 +568,8 @@ class InfoHandler(SimpleHTTPRequestHandler):
         action: Callable[[InfoStorage, str, str], int],
         success_count_key: str,
         success_extra: dict[str, object] | None = None,
+        no_change_status: HTTPStatus = HTTPStatus.NOT_FOUND,
+        no_change_error: str = "entry not found",
     ) -> None:
         srce_ty, srce_id = self._source_key_from_payload(payload)
         if not srce_ty or not srce_id:
@@ -570,10 +591,12 @@ class InfoHandler(SimpleHTTPRequestHandler):
 
         if not changed:
             self._write_json(
-                {"error": "entry not found"},
-                status=HTTPStatus.NOT_FOUND,
+                {"error": no_change_error},
+                status=no_change_status,
             )
             return
+
+        _clear_removed_entry()
 
         response = {
             "ok": True,
@@ -595,9 +618,22 @@ class InfoHandler(SimpleHTTPRequestHandler):
             return
 
         favored = self._binary_value_from_payload(payload, "favored")
-        if favored is None:
+        expected = self._binary_value_from_payload(payload, "expected_favored")
+        expected_revision = self._revision_from_payload(payload)
+        if (
+            favored is None
+            or expected is None
+            or expected_revision is None
+            or favored == expected
+        ):
             self._write_json(
-                {"error": "srce_ty, srce_id and favored(0/1) are required"},
+                {
+                    "error": (
+                        "srce_ty, srce_id, favored(0/1) and "
+                        "expected_favored(0/1), expected_revision are required; "
+                        "favored values must differ"
+                    )
+                },
                 status=HTTPStatus.BAD_REQUEST,
             )
             return
@@ -605,11 +641,16 @@ class InfoHandler(SimpleHTTPRequestHandler):
         self._handle_entry_mutation(
             payload,
             action_error="update favored",
-            action=lambda storage, srce_ty, srce_id: storage.favor_entry(
-                srce_ty, srce_id, favored
+            action=lambda storage, srce_ty, srce_id: storage.favor_entry_if_current(
+                srce_ty, srce_id, expected, expected_revision, favored
             ),
             success_count_key="updated",
-            success_extra={"favored": favored},
+            success_extra={
+                "favored": favored,
+                "state_rev": expected_revision + 1,
+            },
+            no_change_status=HTTPStatus.CONFLICT,
+            no_change_error="entry favored state changed",
         )
 
     def _handle_noticed(self) -> None:
@@ -622,9 +663,22 @@ class InfoHandler(SimpleHTTPRequestHandler):
             return
 
         noticed = self._binary_value_from_payload(payload, "noticed")
-        if noticed is None:
+        expected = self._binary_value_from_payload(payload, "expected_noticed")
+        expected_revision = self._revision_from_payload(payload)
+        if (
+            noticed is None
+            or expected is None
+            or expected_revision is None
+            or noticed == expected
+        ):
             self._write_json(
-                {"error": "srce_ty, srce_id and noticed(0/1) are required"},
+                {
+                    "error": (
+                        "srce_ty, srce_id, noticed(0/1) and "
+                        "expected_noticed(0/1), expected_revision are required; "
+                        "noticed values must differ"
+                    )
+                },
                 status=HTTPStatus.BAD_REQUEST,
             )
             return
@@ -632,11 +686,16 @@ class InfoHandler(SimpleHTTPRequestHandler):
         self._handle_entry_mutation(
             payload,
             action_error="update noticed",
-            action=lambda storage, srce_ty, srce_id: storage.notice_entry(
-                srce_ty, srce_id, noticed
+            action=lambda storage, srce_ty, srce_id: storage.notice_entry_if_current(
+                srce_ty, srce_id, expected, expected_revision, noticed
             ),
             success_count_key="updated",
-            success_extra={"noticed": noticed},
+            success_extra={
+                "noticed": noticed,
+                "state_rev": expected_revision + 1,
+            },
+            no_change_status=HTTPStatus.CONFLICT,
+            no_change_error="entry noticed state changed",
         )
 
     def _handle_remove_entry(self) -> None:
@@ -648,13 +707,96 @@ class InfoHandler(SimpleHTTPRequestHandler):
             )
             return
 
-        self._handle_entry_mutation(
-            payload,
-            action_error="remove entry",
-            action=lambda storage, srce_ty, srce_id: storage.remove_entry(
-                srce_ty, srce_id
-            ),
-            success_count_key="removed",
+        srce_ty, srce_id = self._source_key_from_payload(payload)
+        if not srce_ty or not srce_id:
+            self._write_json(
+                {"error": "srce_ty and srce_id are required"},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+
+        try:
+            with REMOVE_UNDO_LOCK:
+                with InfoStorage(str(self._db_path)) as storage:
+                    entry = storage.pop_entry(srce_ty, srce_id)
+                if entry is not None:
+                    undo_token = secrets.token_urlsafe(24)
+                    REMOVE_UNDO["token"] = undo_token
+                    REMOVE_UNDO["entry"] = entry
+        except Exception as exc:
+            self._write_json(
+                {"error": f"failed to remove entry: {exc}"},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+            return
+
+        if entry is None:
+            self._write_json(
+                {"error": "entry not found"},
+                status=HTTPStatus.NOT_FOUND,
+            )
+            return
+
+        self._write_json(
+            {
+                "ok": True,
+                "removed": 1,
+                "srce_ty": srce_ty,
+                "srce_id": srce_id,
+                "undo_token": undo_token,
+                "entry": entry,
+            }
+        )
+
+    def _handle_restore_entry(self) -> None:
+        payload = self._read_json_body()
+        if payload is None:
+            self._write_json(
+                {"error": "invalid JSON body"},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+
+        token = payload.get("undo_token")
+        if not isinstance(token, str) or not token:
+            self._write_json(
+                {"error": "a valid undo_token is required"},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+
+        try:
+            with REMOVE_UNDO_LOCK:
+                entry = REMOVE_UNDO["entry"]
+                if REMOVE_UNDO["token"] != token or not isinstance(entry, dict):
+                    entry = None
+                else:
+                    with InfoStorage(str(self._db_path)) as storage:
+                        restored = storage.restore_entry(entry)
+                    REMOVE_UNDO["token"] = None
+                    REMOVE_UNDO["entry"] = None
+        except Exception as exc:
+            self._write_json(
+                {"error": f"failed to restore entry: {exc}"},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+            return
+
+        if entry is None:
+            self._write_json(
+                {"error": "undo operation is no longer available"},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+
+        self._write_json(
+            {
+                "ok": True,
+                "restored": int(restored),
+                "already_present": restored == 0,
+                "srce_ty": entry["srce_ty"],
+                "srce_id": entry["srce_id"],
+            }
         )
 
     def _handle_ins_status(self) -> None:

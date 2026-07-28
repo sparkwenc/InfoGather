@@ -16,6 +16,13 @@
       versionIsNot1: false,
       treeGroups: [],
       collapsedGroups: new Set(),
+      lastUndo: null,
+      mutating: false,
+      mutationRefreshTimer: null,
+      renderedFilterSignature: "",
+      renderedFavoredOnly: false,
+      renderedUnnoticedOnly: false,
+      renderedViewValid: false,
       insPollTimer: null,
       insStatusLoading: false,
       insWasRunning: false

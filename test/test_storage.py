@@ -16,6 +16,7 @@ def _entry(*, version: int, noticed: int = 0, title: str = "title") -> dict:
         "version": version,
         "favored": 0,
         "noticed": noticed,
+        "state_rev": 0,
         "updated": f"2026-03-0{version}T00:00:00+00:00",
         "content": {
             "link": "https://arxiv.org/abs/2601.00001",
@@ -109,6 +110,7 @@ class InfoStorageTests(unittest.TestCase):
             self.assertEqual(len(entries), 1)
             self.assertEqual(entries[0]["favored"], 1)
             self.assertEqual(entries[0]["noticed"], 0)
+            self.assertEqual(entries[0]["state_rev"], 0)
 
     def test_only_newer_version_replaces_stored_entry(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -134,6 +136,74 @@ class InfoStorageTests(unittest.TestCase):
                 self.assertEqual(stored["content"]["titl"], "version 3")
                 self.assertEqual(stored["favored"], 1)
                 self.assertEqual(stored["noticed"], 0)
+
+    def test_restore_entry_restores_removed_state_without_downgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "entries.db"
+            removed = _entry(version=2, noticed=1, title="removed")
+            removed["favored"] = 1
+            with InfoStorage(db_path) as storage:
+                with redirect_stdout(io.StringIO()):
+                    storage.insert_entries([removed])
+                popped = storage.pop_entry("arXiv", "2601.00001")
+                expected_restored = {**removed, "state_rev": 1}
+                self.assertEqual(popped, expected_restored)
+                self.assertEqual(storage.restore_entry(popped), 1)
+                restored = storage.export_entries_json()[0]
+                self.assertEqual(restored, expected_restored)
+
+                with redirect_stdout(io.StringIO()):
+                    storage.insert_entries([_entry(version=3, title="newer")])
+                self.assertEqual(storage.restore_entry(removed), 0)
+                restored = storage.export_entries_json()[0]
+                self.assertEqual(restored["version"], 3)
+                self.assertEqual(restored["content"]["titl"], "newer")
+                self.assertEqual(restored["favored"], 1)
+                self.assertEqual(restored["noticed"], 0)
+
+    def test_remove_restore_invalidates_older_flag_undo(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "entries.db"
+            with InfoStorage(db_path) as storage:
+                with redirect_stdout(io.StringIO()):
+                    storage.insert_entries([_entry(version=1)])
+                self.assertEqual(
+                    storage.favor_entry_if_current(
+                        "arXiv", "2601.00001", 0, 0, 1
+                    ),
+                    1,
+                )
+                popped = storage.pop_entry("arXiv", "2601.00001")
+                self.assertEqual(storage.restore_entry(popped), 1)
+
+                self.assertEqual(
+                    storage.favor_entry_if_current(
+                        "arXiv", "2601.00001", 1, 1, 0
+                    ),
+                    0,
+                )
+                restored = storage.export_entries_json()[0]
+                self.assertEqual(restored["favored"], 1)
+                self.assertEqual(restored["state_rev"], 2)
+
+    def test_pop_entry_rolls_back_when_content_is_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "entries.db"
+            with InfoStorage(db_path) as storage:
+                with redirect_stdout(io.StringIO()):
+                    storage.insert_entries([_entry(version=1)])
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    "UPDATE tab_entries SET content = ?",
+                    ("not-json",),
+                )
+
+            with InfoStorage(db_path) as storage:
+                with self.assertRaises(json.JSONDecodeError):
+                    storage.pop_entry("arXiv", "2601.00001")
+            with sqlite3.connect(db_path) as conn:
+                count = conn.execute("SELECT COUNT(*) FROM tab_entries").fetchone()[0]
+            self.assertEqual(count, 1)
 
     def test_export_creates_output_parent(self) -> None:
         with tempfile.TemporaryDirectory() as td:

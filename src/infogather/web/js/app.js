@@ -9,6 +9,7 @@ const listEl = document.getElementById("list");
 const moreEl = document.getElementById("more");
 const qEl = document.getElementById("q");
 const searchEl = document.getElementById("search");
+const undoBtn = document.getElementById("undo-btn");
 const insBtn = document.getElementById("ins-btn");
 const insPanel = document.getElementById("ins-panel");
 const insText = document.getElementById("ins-text");
@@ -29,6 +30,101 @@ const versionNotBtn = document.getElementById("version-not-btn");
 
 function insElements() {
   return { insPanel, insBtn, insText, insPercent, insBar, insLog };
+}
+
+function renderUndo() {
+  undoBtn.textContent = state.lastUndo?.label || "撤销上一步";
+  undoBtn.disabled = !state.lastUndo || state.mutating;
+}
+
+function setLastUndo(action) {
+  state.lastUndo = action;
+  renderUndo();
+}
+
+function beginMutation() {
+  if (state.mutating) return false;
+  state.mutating = true;
+  listEl.setAttribute("aria-busy", "true");
+  listEl.inert = true;
+  renderUndo();
+  return true;
+}
+
+function endMutation() {
+  state.mutating = false;
+  listEl.removeAttribute("aria-busy");
+  listEl.inert = false;
+  renderUndo();
+}
+
+function scheduleMutationRefresh() {
+  if (state.mutationRefreshTimer) {
+    clearTimeout(state.mutationRefreshTimer);
+  }
+  state.entriesGeneration += 1;
+  state.treeGeneration += 1;
+  const entriesGeneration = state.entriesGeneration;
+  const treeGeneration = state.treeGeneration;
+  state.mutationRefreshTimer = setTimeout(() => {
+    state.mutationRefreshTimer = null;
+    if (
+      entriesGeneration !== state.entriesGeneration
+      || treeGeneration !== state.treeGeneration
+    ) {
+      return;
+    }
+    void refreshFilteredView();
+  }, 80);
+}
+
+function findRenderedEntry(item) {
+  return Array.from(listEl.querySelectorAll(".card")).find((card) => (
+    card.dataset.sourceType === String(item.srce_ty || "")
+    && card.dataset.sourceId === String(item.srce_id || "")
+  )) || null;
+}
+
+function removeRenderedCard(card, item = null) {
+  if (!card?.isConnected && item) card = findRenderedEntry(item);
+  if (!card?.isConnected) return;
+  card.remove();
+  state.offset = Math.max(0, state.offset - 1);
+  state.total = Math.max(0, state.total - 1);
+  ui.setMeta(metaEl, state);
+  ui.setMoreVisible(moreEl, state);
+}
+
+function entryMatchesMutableFilters(item) {
+  return (
+    (!state.renderedFavoredOnly || Number(item.favored || 0) === 1)
+    && (!state.renderedUnnoticedOnly || Number(item.noticed || 0) === 0)
+  );
+}
+
+function updateRenderedEntry(item, card = findRenderedEntry(item)) {
+  if (!card?.isConnected) card = findRenderedEntry(item);
+  if (!card?.isConnected) return;
+  if (!entryMatchesMutableFilters(item)) {
+    removeRenderedCard(card, item);
+    return;
+  }
+  card.replaceWith(makeEntryCard(item));
+}
+
+function prependRenderedEntry(item) {
+  const existing = findRenderedEntry(item);
+  if (existing) {
+    existing.replaceWith(makeEntryCard(item));
+    return;
+  }
+  const empty = listEl.querySelector(".empty");
+  if (empty) empty.remove();
+  listEl.prepend(makeEntryCard(item));
+  state.offset += 1;
+  state.total += 1;
+  ui.setMeta(metaEl, state);
+  ui.setMoreVisible(moreEl, state);
 }
 
 function stopInsPolling() {
@@ -171,28 +267,74 @@ async function runIns() {
 }
 
 async function updateFavored(item, favored, btnEl) {
+  if (!beginMutation()) return;
+  const previous = Number(item.favored || 0);
+  const previousRevision = Number(item.state_rev || 0);
+  const filterSignature = state.renderedFilterSignature;
+  const card = btnEl.closest(".card");
   btnEl.disabled = true;
   try {
-    await api.setFavored(item.srce_ty, item.srce_id, favored);
-    await refreshFilteredView();
+    const response = await api.setFavored(
+      item.srce_ty, item.srce_id, favored, previous, previousRevision
+    );
+    item.favored = favored;
+    item.state_rev = response.state_rev;
+    updateRenderedEntry(item, card);
+    setLastUndo({
+      type: "favored",
+      srceTy: item.srce_ty,
+      srceId: item.srce_id,
+      previous: previous,
+      current: favored,
+      currentRevision: previousRevision + 1,
+      item: item,
+      filterSignature: filterSignature,
+      label: favored === 1 ? "撤销收藏" : "撤销取消收藏"
+    });
+    scheduleMutationRefresh();
   } catch (err) {
     console.error(err);
     window.alert("收藏更新失败，请稍后重试。");
+    scheduleMutationRefresh();
   } finally {
     btnEl.disabled = false;
+    endMutation();
   }
 }
 
 async function updateNoticed(item, noticed, btnEl) {
+  if (!beginMutation()) return;
+  const previous = Number(item.noticed || 0);
+  const previousRevision = Number(item.state_rev || 0);
+  const filterSignature = state.renderedFilterSignature;
+  const card = btnEl.closest(".card");
   btnEl.disabled = true;
   try {
-    await api.setNoticed(item.srce_ty, item.srce_id, noticed);
-    await refreshFilteredView();
+    const response = await api.setNoticed(
+      item.srce_ty, item.srce_id, noticed, previous, previousRevision
+    );
+    item.noticed = noticed;
+    item.state_rev = response.state_rev;
+    updateRenderedEntry(item, card);
+    setLastUndo({
+      type: "noticed",
+      srceTy: item.srce_ty,
+      srceId: item.srce_id,
+      previous: previous,
+      current: noticed,
+      currentRevision: previousRevision + 1,
+      item: item,
+      filterSignature: filterSignature,
+      label: noticed === 1 ? "撤销标为已读" : "撤销标为未读"
+    });
+    scheduleMutationRefresh();
   } catch (err) {
     console.error(err);
     window.alert("已读状态更新失败，请稍后重试。");
+    scheduleMutationRefresh();
   } finally {
     btnEl.disabled = false;
+    endMutation();
   }
 }
 
@@ -202,15 +344,101 @@ async function removeEntry(item, btnEl) {
   );
   if (!ok) return;
 
+  if (!beginMutation()) return;
+  const card = btnEl.closest(".card");
+  const filterSignature = state.renderedFilterSignature;
   btnEl.disabled = true;
   try {
-    await api.removeEntry(item.srce_ty, item.srce_id);
-    await refreshFilteredView();
+    const response = await api.removeEntry(item.srce_ty, item.srce_id);
+    removeRenderedCard(card, item);
+    const responseEntry = response.entry;
+    const canRestoreOptimistically = (
+      responseEntry
+      && responseEntry.srce_ty === item.srce_ty
+      && responseEntry.srce_id === item.srce_id
+      && Number(responseEntry.state_rev) === Number(item.state_rev || 0) + 1
+    );
+    setLastUndo({
+      type: "remove",
+      undoToken: response.undo_token,
+      entry: canRestoreOptimistically ? responseEntry : null,
+      filterSignature: filterSignature,
+      label: "撤销移除"
+    });
+    scheduleMutationRefresh();
   } catch (err) {
     console.error(err);
     window.alert("移除失败，请稍后重试。");
+    scheduleMutationRefresh();
   } finally {
     btnEl.disabled = false;
+    endMutation();
+  }
+}
+
+async function undoLastAction() {
+  const action = state.lastUndo;
+  if (!action || !beginMutation()) return;
+
+  state.lastUndo = null;
+  renderUndo();
+  try {
+    if (action.type === "favored") {
+      await api.setFavored(
+        action.srceTy,
+        action.srceId,
+        action.previous,
+        action.current,
+        action.currentRevision
+      );
+    } else if (action.type === "noticed") {
+      await api.setNoticed(
+        action.srceTy,
+        action.srceId,
+        action.previous,
+        action.current,
+        action.currentRevision
+      );
+    } else if (action.type === "remove") {
+      const response = await api.restoreEntry(action.undoToken);
+      if (response.already_present) {
+        window.alert("条目已重新存在，可能因当前筛选条件未显示。");
+      } else if (
+        action.entry
+        && state.renderedViewValid
+        && action.filterSignature === state.renderedFilterSignature
+      ) {
+        prependRenderedEntry(action.entry);
+      }
+    }
+    if (action.item) {
+      action.item[action.type] = action.previous;
+      action.item.state_rev = action.currentRevision + 1;
+      const card = findRenderedEntry(action.item);
+      if (card) {
+        updateRenderedEntry(action.item, card);
+      } else if (
+        state.renderedViewValid
+        && action.filterSignature === state.renderedFilterSignature
+        && entryMatchesMutableFilters(action.item)
+      ) {
+        prependRenderedEntry(action.item);
+      }
+    }
+    scheduleMutationRefresh();
+  } catch (err) {
+    if (![404, 409].includes(err.status) && !state.lastUndo) {
+      state.lastUndo = action;
+    }
+    console.error(err);
+    window.alert(
+      [404, 409].includes(err.status)
+        ? "该操作已无法撤销。"
+        : "撤销失败，请稍后重试。"
+    );
+    scheduleMutationRefresh();
+  } finally {
+    endMutation();
   }
 }
 
@@ -243,6 +471,7 @@ async function fetchEntries({ reset = false } = {}) {
   const queryOffset = reset ? 0 : state.offset;
 
   const params = buildFilterParams();
+  const filterSignature = params.toString();
   params.set("limit", String(pageSize));
   params.set("offset", String(queryOffset));
 
@@ -256,6 +485,10 @@ async function fetchEntries({ reset = false } = {}) {
     if (reset) {
       state.offset = items.length;
       state.total = nextTotal;
+      state.renderedFilterSignature = filterSignature;
+      state.renderedFavoredOnly = params.get("favored") === "1";
+      state.renderedUnnoticedOnly = params.get("unnoticed") === "1";
+      state.renderedViewValid = true;
     } else {
       state.offset += items.length;
       state.total = nextTotal;
@@ -265,6 +498,7 @@ async function fetchEntries({ reset = false } = {}) {
     if (reset || !listEl.children.length) {
       state.offset = 0;
       state.total = 0;
+      if (reset) state.renderedViewValid = false;
       listEl.innerHTML = '<p class="empty">读取失败，请确认本地服务已启动。</p>';
     }
     console.error(err);
@@ -281,6 +515,7 @@ async function fetchEntries({ reset = false } = {}) {
 }
 
 insBtn.addEventListener("click", runIns);
+undoBtn.addEventListener("click", undoLastAction);
 
 favoredBtn.addEventListener("click", () => {
   state.favoredOnly = !state.favoredOnly;
@@ -352,6 +587,7 @@ moreEl.addEventListener("click", () => {
 });
 
 async function bootstrap() {
+  renderUndo();
   ui.setToggle(favoredBtn, false);
   if (unnoticedBtn) ui.setToggle(unnoticedBtn, false);
   ui.setToggle(dayBtn, false);

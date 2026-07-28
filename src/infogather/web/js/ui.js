@@ -75,6 +75,8 @@
     const noticedValue = Number(item.noticed || 0);
     const card = document.createElement("article");
     card.className = "card";
+    card.dataset.sourceType = String(item.srce_ty || "");
+    card.dataset.sourceId = String(item.srce_id || "");
 
     const head = document.createElement("div");
     head.className = "card-head";

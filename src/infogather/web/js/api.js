@@ -4,7 +4,9 @@
   }
 
   function makeHttpError(resp, payload) {
-    return new Error(payload.error || `HTTP ${resp.status}`);
+    const error = new Error(payload.error || `HTTP ${resp.status}`);
+    error.status = resp.status;
+    return error;
   }
 
   function buildQuery(params) {
@@ -60,19 +62,27 @@
     return payload;
   }
 
-  async function setFavored(srceTy, srceId, favored) {
+  async function setFavored(
+    srceTy, srceId, favored, expectedFavored, expectedRevision
+  ) {
     return await postJson("/api/favored", {
       srce_ty: srceTy,
       srce_id: srceId,
-      favored: favored
+      favored: favored,
+      expected_favored: expectedFavored,
+      expected_revision: expectedRevision
     });
   }
 
-  async function setNoticed(srceTy, srceId, noticed) {
+  async function setNoticed(
+    srceTy, srceId, noticed, expectedNoticed, expectedRevision
+  ) {
     return await postJson("/api/noticed", {
       srce_ty: srceTy,
       srce_id: srceId,
-      noticed: noticed
+      noticed: noticed,
+      expected_noticed: expectedNoticed,
+      expected_revision: expectedRevision
     });
   }
 
@@ -83,6 +93,10 @@
     });
   }
 
+  async function restoreEntry(undoToken) {
+    return await postJson("/api/restore-entry", { undo_token: undoToken });
+  }
+
   global.InfoAPI = {
     getInsStatus,
     runIns,
@@ -90,6 +104,7 @@
     getEntries,
     setFavored,
     setNoticed,
-    removeEntry
+    removeEntry,
+    restoreEntry
   };
 })(window);

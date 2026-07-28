@@ -45,8 +45,11 @@ def _seed_entry(db_path: Path) -> None:
 class HandlerHarness:
     _source_key_from_payload = staticmethod(InfoHandler._source_key_from_payload)
     _binary_value_from_payload = staticmethod(InfoHandler._binary_value_from_payload)
+    _revision_from_payload = staticmethod(InfoHandler._revision_from_payload)
     _handle_entry_mutation = InfoHandler._handle_entry_mutation
     _handle_favored = InfoHandler._handle_favored
+    _handle_remove_entry = InfoHandler._handle_remove_entry
+    _handle_restore_entry = InfoHandler._handle_restore_entry
 
     def __init__(self, db_path: Path, payload: dict | None) -> None:
         self._db_path = db_path
@@ -113,13 +116,24 @@ class ServeInsTests(unittest.TestCase):
 
 
 class ServeMutationEndpointTests(unittest.TestCase):
+    def setUp(self) -> None:
+        with serve.REMOVE_UNDO_LOCK:
+            serve.REMOVE_UNDO["token"] = None
+            serve.REMOVE_UNDO["entry"] = None
+
     def test_favored_endpoint_updates_entry(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "entries.db"
             _seed_entry(db_path)
             harness = HandlerHarness(
                 db_path=db_path,
-                payload={"srce_ty": "arXiv", "srce_id": "2601.00001", "favored": 1},
+                payload={
+                    "srce_ty": "arXiv",
+                    "srce_id": "2601.00001",
+                    "favored": 1,
+                    "expected_favored": 0,
+                    "expected_revision": 0,
+                },
             )
 
             harness._handle_favored()
@@ -141,7 +155,13 @@ class ServeMutationEndpointTests(unittest.TestCase):
             _seed_entry(db_path)
             harness = HandlerHarness(
                 db_path=db_path,
-                payload={"srce_ty": "arXiv", "srce_id": "2601.00001", "favored": 2},
+                payload={
+                    "srce_ty": "arXiv",
+                    "srce_id": "2601.00001",
+                    "favored": 2,
+                    "expected_favored": 0,
+                    "expected_revision": 0,
+                },
             )
 
             harness._handle_favored()
@@ -157,9 +177,77 @@ class ServeMutationEndpointTests(unittest.TestCase):
             _seed_entry(db_path)
             harness = HandlerHarness(
                 db_path=db_path,
-                payload={"srce_ty": "arXiv", "srce_id": "2601.00001", "favored": 1.9},
+                payload={
+                    "srce_ty": "arXiv",
+                    "srce_id": "2601.00001",
+                    "favored": 1.9,
+                    "expected_favored": 0,
+                    "expected_revision": 0,
+                },
             )
 
             harness._handle_favored()
 
             self.assertEqual(harness.status, HTTPStatus.BAD_REQUEST)
+
+    def test_favored_endpoint_rejects_stale_current_value(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "entries.db"
+            _seed_entry(db_path)
+            with InfoStorage(db_path) as storage:
+                storage.favor_entry("arXiv", "2601.00001", 1)
+            harness = HandlerHarness(
+                db_path=db_path,
+                payload={
+                    "srce_ty": "arXiv",
+                    "srce_id": "2601.00001",
+                    "favored": 1,
+                    "expected_favored": 0,
+                    "expected_revision": 0,
+                },
+            )
+
+            harness._handle_favored()
+
+            self.assertEqual(harness.status, HTTPStatus.CONFLICT)
+
+    def test_restore_endpoint_restores_removed_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "entries.db"
+            _seed_entry(db_path)
+            with InfoStorage(db_path) as storage:
+                newer = storage.export_entries_json()[0]
+                newer["version"] = 2
+                newer["updated"] = "2026-03-02T00:00:00+00:00"
+                newer["content"]["titl"] = "Newer title"
+                with redirect_stdout(io.StringIO()):
+                    storage.insert_entries([newer])
+            remove_harness = HandlerHarness(
+                db_path=db_path,
+                payload={"srce_ty": "arXiv", "srce_id": "2601.00001"},
+            )
+            remove_harness._handle_remove_entry()
+            response = cast(dict, remove_harness.response)
+            harness = HandlerHarness(
+                db_path=db_path,
+                payload={"undo_token": response["undo_token"]},
+            )
+
+            harness._handle_restore_entry()
+
+            self.assertEqual(harness.status, HTTPStatus.OK)
+            with InfoStorage(db_path) as storage:
+                restored = storage.export_entries_json()[0]
+            self.assertEqual(restored["version"], 2)
+            self.assertEqual(restored["content"]["titl"], "Newer title")
+
+    def test_restore_endpoint_rejects_invalid_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            harness = HandlerHarness(
+                db_path=Path(td) / "entries.db",
+                payload={"undo_token": "unknown"},
+            )
+
+            harness._handle_restore_entry()
+
+            self.assertEqual(harness.status, HTTPStatus.CONFLICT)

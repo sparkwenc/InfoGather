@@ -168,6 +168,15 @@ body {
   font-size: 13px;
   cursor: pointer;
 }
+.btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+.undo-btn:not(:disabled) {
+  border-color: #c4b5fd;
+  background: #f5f3ff;
+  color: #5b21b6;
+}
 .btn-primary {
   background: var(--primary);
   border-color: var(--primary);
@@ -244,6 +253,10 @@ body {
   margin-top: 12px;
   display: grid;
   gap: 10px;
+}
+.list[aria-busy="true"] .card-actions {
+  opacity: 0.55;
+  pointer-events: none;
 }
 .card {
   background: #fff;
