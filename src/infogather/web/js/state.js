@@ -19,6 +19,7 @@
       lastUndo: null,
       mutating: false,
       mutationRefreshTimer: null,
+      mutationRefreshNeedsEntries: false,
       renderedFilterSignature: "",
       renderedFavoredOnly: false,
       renderedUnnoticedOnly: false,

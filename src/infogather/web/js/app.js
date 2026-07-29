@@ -35,7 +35,8 @@ function insElements() {
 
 function renderUndo() {
   undoBtn.textContent = state.lastUndo?.label || "撤销上一步";
-  undoBtn.disabled = !state.lastUndo || state.mutating;
+  undoBtn.disabled = !state.lastUndo;
+  undoBtn.setAttribute("aria-busy", String(state.mutating));
 }
 
 function setLastUndo(action) {
@@ -57,23 +58,33 @@ function endMutation() {
   renderUndo();
 }
 
-function scheduleMutationRefresh() {
+function scheduleMutationRefresh({ entries = false } = {}) {
   if (state.mutationRefreshTimer) {
     clearTimeout(state.mutationRefreshTimer);
   }
-  state.entriesGeneration += 1;
+  state.mutationRefreshNeedsEntries ||= entries || state.loading;
   state.treeGeneration += 1;
+  if (state.mutationRefreshNeedsEntries) {
+    state.entriesGeneration += 1;
+  }
   const entriesGeneration = state.entriesGeneration;
   const treeGeneration = state.treeGeneration;
   state.mutationRefreshTimer = setTimeout(() => {
     state.mutationRefreshTimer = null;
     if (
-      entriesGeneration !== state.entriesGeneration
-      || treeGeneration !== state.treeGeneration
+      treeGeneration !== state.treeGeneration
+      || (
+        state.mutationRefreshNeedsEntries
+        && entriesGeneration !== state.entriesGeneration
+      )
     ) {
+      state.mutationRefreshNeedsEntries = false;
       return;
     }
-    void refreshFilteredView();
+    const refreshEntries = state.mutationRefreshNeedsEntries;
+    state.mutationRefreshNeedsEntries = false;
+    if (refreshEntries) void refreshFilteredView();
+    else void loadTagTree();
   }, 80);
 }
 
@@ -101,31 +112,44 @@ function entryMatchesMutableFilters(item) {
   );
 }
 
-function updateRenderedEntry(
-  item,
-  card = findRenderedEntry(item),
-  focusedAction = null
-) {
+function updateRenderedEntry(item, card = findRenderedEntry(item)) {
   if (!card?.isConnected) card = findRenderedEntry(item);
   if (!card?.isConnected) return;
   if (!entryMatchesMutableFilters(item)) {
     removeRenderedCard(card, item);
     return;
   }
-  focusedAction ||= card.contains(document.activeElement)
-    ? document.activeElement?.dataset?.action
-    : null;
-  const replacement = makeEntryCard(item);
-  card.replaceWith(replacement);
-  if (focusedAction) {
-    replacement.querySelector(`[data-action="${focusedAction}"]`)?.focus();
+  const title = card.querySelector(".title")?.textContent || "该条目";
+  const favored = Number(item.favored || 0) === 1;
+  const favoredBtn = card.querySelector('[data-action="favored"]');
+  if (favoredBtn) {
+    favoredBtn.classList.toggle("on", favored);
+    favoredBtn.dataset.favored = favored ? "1" : "0";
+    favoredBtn.textContent = favored ? "已收藏" : "收藏";
+    favoredBtn.setAttribute("aria-pressed", String(favored));
+    favoredBtn.setAttribute(
+      "aria-label",
+      favored ? `取消收藏《${title}》` : `收藏《${title}》`
+    );
+  }
+  const noticed = Number(item.noticed || 0) === 1;
+  const noticedBtn = card.querySelector('[data-action="noticed"]');
+  if (noticedBtn) {
+    noticedBtn.classList.toggle("on", noticed);
+    noticedBtn.dataset.noticed = noticed ? "1" : "0";
+    noticedBtn.textContent = noticed ? "已读" : "未读";
+    noticedBtn.setAttribute("aria-pressed", String(noticed));
+    noticedBtn.setAttribute(
+      "aria-label",
+      noticed ? `标记《${title}》为未读` : `标记《${title}》为已读`
+    );
   }
 }
 
 function prependRenderedEntry(item) {
   const existing = findRenderedEntry(item);
   if (existing) {
-    existing.replaceWith(makeEntryCard(item));
+    updateRenderedEntry(item, existing);
     return;
   }
   const empty = listEl.querySelector(".empty");
@@ -306,16 +330,14 @@ async function updateFavored(item, favored, btnEl) {
   const filterSignature = state.renderedFilterSignature;
   const card = btnEl.closest(".card");
   const restoreFocus = btnEl.matches(":focus-visible");
-  const focusedAction = restoreFocus ? btnEl.dataset.action : null;
   let focusUndo = false;
-  btnEl.disabled = true;
   try {
     const response = await api.setFavored(
       item.srce_ty, item.srce_id, favored, previous, previousRevision
     );
     item.favored = favored;
     item.state_rev = response.state_rev;
-    updateRenderedEntry(item, card, focusedAction);
+    updateRenderedEntry(item, card);
     setLastUndo({
       type: "favored",
       srceTy: item.srce_ty,
@@ -332,9 +354,8 @@ async function updateFavored(item, favored, btnEl) {
   } catch (err) {
     console.error(err);
     window.alert("收藏更新失败，请稍后重试。");
-    scheduleMutationRefresh();
+    scheduleMutationRefresh({ entries: true });
   } finally {
-    btnEl.disabled = false;
     endMutation();
     if (focusUndo) undoBtn.focus();
   }
@@ -347,16 +368,14 @@ async function updateNoticed(item, noticed, btnEl) {
   const filterSignature = state.renderedFilterSignature;
   const card = btnEl.closest(".card");
   const restoreFocus = btnEl.matches(":focus-visible");
-  const focusedAction = restoreFocus ? btnEl.dataset.action : null;
   let focusUndo = false;
-  btnEl.disabled = true;
   try {
     const response = await api.setNoticed(
       item.srce_ty, item.srce_id, noticed, previous, previousRevision
     );
     item.noticed = noticed;
     item.state_rev = response.state_rev;
-    updateRenderedEntry(item, card, focusedAction);
+    updateRenderedEntry(item, card);
     setLastUndo({
       type: "noticed",
       srceTy: item.srce_ty,
@@ -373,15 +392,15 @@ async function updateNoticed(item, noticed, btnEl) {
   } catch (err) {
     console.error(err);
     window.alert("已读状态更新失败，请稍后重试。");
-    scheduleMutationRefresh();
+    scheduleMutationRefresh({ entries: true });
   } finally {
-    btnEl.disabled = false;
     endMutation();
     if (focusUndo) undoBtn.focus();
   }
 }
 
 async function removeEntry(item, btnEl) {
+  if (state.mutating) return;
   const ok = window.confirm(
     `确认从本地列表移除 ${item.srce_ty}:${item.srce_id}？再次拉取时可能恢复。`
   );
@@ -392,7 +411,6 @@ async function removeEntry(item, btnEl) {
   const restoreFocus = btnEl.matches(":focus-visible");
   let focusUndo = false;
   const filterSignature = state.renderedFilterSignature;
-  btnEl.disabled = true;
   try {
     const response = await api.removeEntry(item.srce_ty, item.srce_id);
     removeRenderedCard(card, item);
@@ -415,9 +433,8 @@ async function removeEntry(item, btnEl) {
   } catch (err) {
     console.error(err);
     window.alert("移除失败，请稍后重试。");
-    scheduleMutationRefresh();
+    scheduleMutationRefresh({ entries: true });
   } finally {
-    btnEl.disabled = false;
     endMutation();
     if (focusUndo) undoBtn.focus();
   }
@@ -431,6 +448,7 @@ async function undoLastAction() {
   state.lastUndo = null;
   renderUndo();
   let succeeded = false;
+  let needsEntriesRefresh = false;
   try {
     if (action.type === "favored") {
       await api.setFavored(
@@ -452,12 +470,15 @@ async function undoLastAction() {
       const response = await api.restoreEntry(action.undoToken);
       if (response.already_present) {
         window.alert("条目已重新存在，可能因当前筛选条件未显示。");
+        needsEntriesRefresh = true;
       } else if (
         action.entry
         && state.renderedViewValid
         && action.filterSignature === state.renderedFilterSignature
       ) {
         prependRenderedEntry(action.entry);
+      } else {
+        needsEntriesRefresh = true;
       }
     }
     if (action.item) {
@@ -474,7 +495,7 @@ async function undoLastAction() {
         prependRenderedEntry(action.item);
       }
     }
-    scheduleMutationRefresh();
+    scheduleMutationRefresh({ entries: needsEntriesRefresh });
     succeeded = true;
   } catch (err) {
     if (![404, 409].includes(err.status) && !state.lastUndo) {
@@ -486,7 +507,7 @@ async function undoLastAction() {
         ? "该操作已无法撤销。"
         : "撤销失败，请稍后重试。"
     );
-    scheduleMutationRefresh();
+    scheduleMutationRefresh({ entries: true });
   } finally {
     endMutation();
     if (restoreFocus) {

@@ -25,6 +25,7 @@
   --radius-md: 13px;
   --radius-lg: 18px;
   --shell: 1320px;
+  --sticky-top: 18px;
 }
 
 * {
@@ -185,7 +186,7 @@ input {
 
 .sidebar {
   position: sticky;
-  top: 18px;
+  top: var(--sticky-top);
   display: flex;
   flex-direction: column;
   max-height: calc(100dvh - 36px);
@@ -373,12 +374,20 @@ input {
   min-width: 0;
 }
 
-.filter-panel {
+.workspace-toolbar {
   position: sticky;
-  top: 12px;
+  top: var(--sticky-top);
   z-index: 12;
-  padding: 16px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: rgb(255 254 250 / 0.96);
   box-shadow: 0 12px 30px rgb(24 32 42 / 0.1);
+  backdrop-filter: blur(14px);
+}
+
+.filter-panel {
+  padding: 16px;
 }
 
 .search-row {
@@ -540,21 +549,20 @@ input {
 }
 
 .search-button {
-  min-width: 74px;
+  min-width: 104px;
   height: 44px;
 }
 
 .results-toolbar {
-  margin: 16px 0 10px;
-  padding: 13px 4px 12px;
-}
-
-.results-toolbar h2 {
-  font-size: 24px;
+  display: block;
+  margin: 0;
+  padding: 10px 16px 12px;
+  border-top: 1px solid var(--line);
+  background: rgb(247 246 242 / 0.82);
 }
 
 .meta {
-  margin: 3px 0 0;
+  margin: 0;
   color: var(--muted);
   font-size: 12px;
 }
@@ -563,6 +571,12 @@ input {
   border-color: #b9c8d4;
   color: var(--accent-deep);
   background: #f7fafc;
+}
+
+.filter-row .undo-btn {
+  min-width: 104px;
+  min-height: 40px;
+  margin-left: auto;
 }
 
 .ins-panel {
@@ -628,11 +642,7 @@ input {
 .list {
   display: grid;
   gap: 10px;
-}
-
-.list[aria-busy="true"] .card-actions {
-  opacity: 0.5;
-  pointer-events: none;
+  margin-top: 10px;
 }
 
 .card {
@@ -879,13 +889,17 @@ input {
     padding: 12px;
   }
 
+  .workspace-toolbar {
+    top: 6px;
+  }
+
   .search-row {
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 7px;
   }
 
   .search-button {
-    min-width: 66px;
+    min-width: 88px;
   }
 
   .filter-row {
@@ -911,17 +925,15 @@ input {
   }
 
   .results-toolbar {
-    margin-top: 10px;
-    padding-right: 2px;
-    padding-left: 2px;
-  }
-
-  .results-toolbar h2 {
-    font-size: 21px;
+    padding: 10px 12px 12px;
   }
 
   .undo-btn {
     min-height: 40px;
+  }
+
+  .filter-row .undo-btn {
+    min-width: 88px;
   }
 
   .card {
