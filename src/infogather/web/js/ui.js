@@ -1,4 +1,6 @@
 (function (global) {
+  let cardSequence = 0;
+
   function fmtDate(iso) {
     try {
       return new Intl.DateTimeFormat("zh-CN", {
@@ -42,18 +44,22 @@
 
   function renderInsJob(elements, job) {
     const { insPanel, insBtn, insPercent, insBar, insText, insLog } = elements;
+    const insBtnLabel = insBtn.querySelector("#ins-btn-label");
 
     if (!job || (job.state === "idle" && !job.started_at)) {
       insPanel.hidden = true;
       insBtn.disabled = false;
-      insBtn.textContent = "拉取更新";
+      if (insBtnLabel) insBtnLabel.textContent = "拉取更新";
       return;
     }
 
     insPanel.hidden = false;
+    insPanel.dataset.state = job.state || "idle";
     const progress = Math.max(0, Math.min(100, Number(job.progress || 0)));
     insPercent.textContent = `${progress}%`;
     insBar.style.width = `${progress}%`;
+    const track = insBar.parentElement;
+    track?.setAttribute("aria-valuenow", String(progress));
 
     let prefix = "状态";
     if (job.state === "running") prefix = "拉取中";
@@ -66,13 +72,26 @@
 
     const running = job.state === "running";
     insBtn.disabled = running;
-    insBtn.textContent = running ? "拉取中..." : "拉取更新";
+    if (insBtnLabel) {
+      insBtnLabel.textContent = running ? "拉取中..." : "拉取更新";
+    }
+  }
+
+  function safeHttpUrl(value) {
+    if (typeof value !== "string" || !value.trim()) return null;
+    try {
+      const url = new URL(value, window.location.href);
+      return ["http:", "https:"].includes(url.protocol) ? url.href : null;
+    } catch {
+      return null;
+    }
   }
 
   function makeCard(item, handlers) {
     const c = item.content || {};
     const favoredValue = Number(item.favored || 0);
     const noticedValue = Number(item.noticed || 0);
+    const title = String(c.titl || "无标题");
     const card = document.createElement("article");
     card.className = "card";
     card.dataset.sourceType = String(item.srce_ty || "");
@@ -83,18 +102,32 @@
 
     const h = document.createElement("h2");
     h.className = "title";
-    const a = document.createElement("a");
-    a.href = c.link || "#";
-    a.target = "_blank";
-    a.rel = "noopener noreferrer";
-    a.textContent = c.titl || "(No title)";
-    h.appendChild(a);
+    h.id = `entry-title-${++cardSequence}`;
+    card.setAttribute("aria-labelledby", h.id);
+    const link = safeHttpUrl(c.link);
+    if (link) {
+      const a = document.createElement("a");
+      a.href = link;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.textContent = title;
+      a.setAttribute("aria-label", `${title}（在新标签页打开）`);
+      h.appendChild(a);
+    } else {
+      h.textContent = title;
+    }
 
     const favBtn = document.createElement("button");
     favBtn.type = "button";
     favBtn.className = favoredValue === 1 ? "fav-btn on" : "fav-btn";
+    favBtn.dataset.action = "favored";
     favBtn.dataset.favored = String(favoredValue);
     favBtn.textContent = favoredValue === 1 ? "已收藏" : "收藏";
+    favBtn.setAttribute("aria-pressed", String(favoredValue === 1));
+    favBtn.setAttribute(
+      "aria-label",
+      favoredValue === 1 ? `取消收藏《${title}》` : `收藏《${title}》`
+    );
     favBtn.addEventListener("click", async () => {
       const current = Number(favBtn.dataset.favored || 0);
       const next = current === 1 ? 0 : 1;
@@ -104,8 +137,14 @@
     const noticeBtn = document.createElement("button");
     noticeBtn.type = "button";
     noticeBtn.className = noticedValue === 1 ? "notice-btn on" : "notice-btn";
+    noticeBtn.dataset.action = "noticed";
     noticeBtn.dataset.noticed = String(noticedValue);
     noticeBtn.textContent = noticedValue === 1 ? "已读" : "未读";
+    noticeBtn.setAttribute("aria-pressed", String(noticedValue === 1));
+    noticeBtn.setAttribute(
+      "aria-label",
+      noticedValue === 1 ? `标记《${title}》为未读` : `标记《${title}》为已读`
+    );
     noticeBtn.addEventListener("click", async () => {
       const current = Number(noticeBtn.dataset.noticed || 0);
       const next = current === 1 ? 0 : 1;
@@ -115,7 +154,9 @@
     const delBtn = document.createElement("button");
     delBtn.type = "button";
     delBtn.className = "del-btn";
+    delBtn.dataset.action = "remove";
     delBtn.textContent = "移除";
+    delBtn.setAttribute("aria-label", `移除《${title}》`);
     delBtn.addEventListener("click", async () => {
       await handlers.onRemove(item, delBtn);
     });
@@ -134,9 +175,7 @@
     m1.textContent = [
       "作者: " + (c.auth || "-"),
       "来源: " + (item.srce_ty || "-") + ":" + (item.srce_id || "-"),
-      "版本: v" + (item.version ?? "-"),
-      "已读: " + (item.noticed ? "是" : "否"),
-      "收藏: " + (item.favored ? "是" : "否")
+      "版本: v" + (item.version ?? "-")
     ].join("  ·  ");
 
     const m2 = document.createElement("p");
@@ -170,13 +209,13 @@
     const fragment = document.createDocumentFragment();
     if (!state.treeGroups.length) {
       const empty = document.createElement("li");
-      empty.className = "tree-item";
-      empty.innerHTML = '<label>暂无源</label>';
+      empty.className = "tree-item tree-empty";
+      empty.textContent = "暂无来源";
       treeListEl.replaceChildren(empty);
       return;
     }
 
-    state.treeGroups.forEach((group) => {
+    state.treeGroups.forEach((group, groupIndex) => {
       const groupKey = String(group.name || "");
       const isCollapsed = state.collapsedGroups.has(groupKey);
       const groupLi = document.createElement("li");
@@ -192,8 +231,16 @@
       const toggle = document.createElement("button");
       toggle.type = "button";
       toggle.className = "tree-group-toggle";
+      toggle.dataset.groupKey = groupKey;
       toggle.textContent = isCollapsed ? "+" : "−";
       toggle.title = isCollapsed ? "展开" : "折叠";
+      const childrenId = `tree-group-${groupIndex}`;
+      toggle.setAttribute("aria-expanded", String(!isCollapsed));
+      toggle.setAttribute("aria-controls", childrenId);
+      toggle.setAttribute(
+        "aria-label",
+        `${isCollapsed ? "展开" : "折叠"} ${group.name}`
+      );
       toggle.addEventListener("click", () => {
         handlers.onToggleGroup(groupKey);
       });
@@ -204,10 +251,11 @@
 
       const childUl = document.createElement("ul");
       childUl.className = "tree-children";
+      childUl.id = childrenId;
       childUl.hidden = isCollapsed;
 
       const children = Array.isArray(group.children) ? group.children : [];
-      children.forEach((node) => {
+      children.forEach((node, childIndex) => {
         const selectorType = node.selector_type || "tag";
         const selectorValue = node.selector_value || node.name || "";
         const selector = `${selectorType}:${selectorValue}`;
@@ -221,7 +269,9 @@
 
         const checkbox = document.createElement("input");
         checkbox.type = "checkbox";
+        checkbox.id = `source-${groupIndex}-${childIndex}`;
         checkbox.checked = state.selectedSelectors.has(selector);
+        label.htmlFor = checkbox.id;
         checkbox.addEventListener("change", () => {
           handlers.onSelectorChange(selector, checkbox.checked);
         });

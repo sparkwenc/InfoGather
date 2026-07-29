@@ -13,6 +13,7 @@ from infogather.serve import (
     InfoHandler,
     InfoStorage,
     _normalize_db_path,
+    _ins_progress_from_line,
     _run_ins_job,
 )
 import infogather.serve as serve
@@ -113,6 +114,34 @@ class ServeInsTests(unittest.TestCase):
         uri = "file:///tmp/entries.db?mode=ro"
 
         self.assertEqual(_normalize_db_path(uri), uri)
+
+    def test_source_progress_line_reports_completed_feeds(self) -> None:
+        progress, message = _ins_progress_from_line(
+            "SOURCE 4/17: 20 from Example",
+            8,
+        )
+
+        self.assertEqual(progress, 21)
+        self.assertEqual(message, "抓取源 4/17")
+
+    def test_run_ins_job_reports_partial_failure(self) -> None:
+        class _FakeProc:
+            stdout = [
+                "SOURCE 1/2: failed Example: timeout\n",
+                "Fetch result: 10 entries, 0 cached, 1 failed from 2 feeds\n",
+            ]
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def wait(self) -> int:
+                return 0
+
+        with mock.patch.object(serve.subprocess, "Popen", side_effect=_FakeProc):
+            _run_ins_job(Path("/tmp/entries.db"), Path("/tmp/config.toml"))
+
+        self.assertEqual(serve.INS_JOB["state"], "succeeded")
+        self.assertEqual(serve.INS_JOB["message"], "拉取完成，部分源失败")
 
 
 class ServeMutationEndpointTests(unittest.TestCase):
@@ -217,6 +246,9 @@ class ServeMutationEndpointTests(unittest.TestCase):
             _seed_entry(db_path)
             with InfoStorage(db_path) as storage:
                 newer = storage.export_entries_json()[0]
+                storage.update_feed_states(
+                    {"https://example.com/feed": {"next_fetch_at": 999}}
+                )
                 newer["version"] = 2
                 newer["updated"] = "2026-03-02T00:00:00+00:00"
                 newer["content"]["titl"] = "Newer title"
@@ -228,6 +260,8 @@ class ServeMutationEndpointTests(unittest.TestCase):
             )
             remove_harness._handle_remove_entry()
             response = cast(dict, remove_harness.response)
+            with InfoStorage(db_path) as storage:
+                self.assertEqual(storage.get_feed_states(), {})
             harness = HandlerHarness(
                 db_path=db_path,
                 payload={"undo_token": response["undo_token"]},

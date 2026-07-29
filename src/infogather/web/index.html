@@ -5,61 +5,107 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>InfoGather</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
-  <link rel="stylesheet" href="./css/app.css?v=20260304h" />
+  <link rel="stylesheet" href="./css/app.css?v=20260729b" />
 </head>
 <body>
-  <main class="wrap">
-    <section class="head">
-      <h1>InfoGather</h1>
-      <div class="meta" id="meta">加载中...</div>
-    </section>
+  <a class="skip-link" href="#list">跳到条目</a>
+  <div class="app-frame">
+    <header class="app-header">
+      <div class="brand-lockup">
+        <div class="brand-mark" aria-hidden="true">IG</div>
+        <div>
+          <div class="eyebrow">PERSONAL RESEARCH INBOX</div>
+          <h1>InfoGather</h1>
+          <p>收集、筛选并沉淀值得重读的论文。</p>
+        </div>
+      </div>
+    </header>
 
-    <section class="layout">
-      <aside class="sidebar sidebar-left">
-        <div class="side-title">源选择（树状）</div>
-        <div id="tree-root" class="tree-root">arXiv</div>
-        <div class="side-ins">
-          <button id="ins-btn" class="btn btn-primary side-ins-btn" type="button">拉取更新</button>
-          <section id="ins-panel" class="ins-panel side-ins-panel" hidden>
+    <main id="main-content" class="app-layout">
+      <aside class="sidebar panel" aria-labelledby="source-heading">
+        <div class="panel-heading">
+          <div>
+            <div class="section-kicker">LIBRARY</div>
+            <h2 id="source-heading">来源</h2>
+          </div>
+          <button id="clear-tags" class="text-button" type="button" disabled>清空</button>
+        </div>
+        <div class="ingestion-area">
+          <button id="ins-btn" class="btn btn-primary ins-trigger" type="button">
+            <span class="btn-dot" aria-hidden="true"></span>
+            <span id="ins-btn-label">拉取更新</span>
+          </button>
+          <section id="ins-panel" class="ins-panel" hidden data-state="idle">
             <div class="ins-row">
-              <span id="ins-text">等待中</span>
+              <span id="ins-text" role="status" aria-live="polite">等待中</span>
               <span id="ins-percent">0%</span>
             </div>
-            <div class="ins-track"><div id="ins-bar" class="ins-bar"></div></div>
+            <div
+              class="ins-track"
+              role="progressbar"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow="0"
+              aria-label="拉取进度"
+              aria-describedby="ins-text"
+            ><div id="ins-bar" class="ins-bar"></div></div>
             <div id="ins-log" class="ins-log"></div>
           </section>
         </div>
+        <p id="tree-root" class="tree-root">正在读取配置源...</p>
+        <p class="source-help">可多选，匹配任一来源；数量随筛选更新。</p>
         <ul id="tree-list" class="tree-list"></ul>
-        <div class="side-actions">
-          <button id="clear-tags" class="btn" type="button">清空选择</button>
-        </div>
       </aside>
 
-      <section class="panel main">
-        <div class="controls">
-          <input id="q" type="search" placeholder="搜索标题/摘要/作者/标签" />
-          <button id="favored-btn" class="btn btn-toggle" type="button" aria-pressed="false">仅收藏</button>
-          <button id="unnoticed-btn" class="btn btn-toggle" type="button" aria-pressed="false">仅未读</button>
-          <button id="day-btn" class="btn btn-toggle" type="button" aria-pressed="false">一天内更新</button>
-          <button id="week-btn" class="btn btn-toggle" type="button" aria-pressed="false">一周内更新</button>
-          <button id="version-btn" class="btn btn-toggle" type="button" aria-pressed="false">version=1</button>
-          <button id="version-not-btn" class="btn btn-toggle" type="button" aria-pressed="false">version!=1</button>
-          <button id="search" class="btn btn-primary" type="button">应用过滤</button>
-          <button id="undo-btn" class="btn undo-btn" type="button" disabled>撤销上一步</button>
-        </div>
+      <section class="workspace" aria-labelledby="results-heading">
+        <section class="filter-panel panel" aria-label="筛选条目">
+          <div class="search-row">
+            <label class="search-field" for="q">
+              <span class="sr-only">搜索条目</span>
+              <span class="search-icon" aria-hidden="true"></span>
+              <input id="q" type="search" placeholder="标题、摘要、作者、标签或编号" />
+            </label>
+            <button id="search" class="btn btn-primary search-button" type="button">搜索</button>
+          </div>
+          <div class="filter-row">
+            <div class="filter-group">
+              <span class="filter-label">状态</span>
+              <button id="favored-btn" class="btn btn-toggle" type="button" aria-pressed="false">仅收藏</button>
+              <button id="unnoticed-btn" class="btn btn-toggle" type="button" aria-pressed="false">仅未读</button>
+            </div>
+            <div class="filter-group">
+              <span class="filter-label">更新</span>
+              <button id="day-btn" class="btn btn-toggle" type="button" aria-pressed="false">24 小时</button>
+              <button id="week-btn" class="btn btn-toggle" type="button" aria-pressed="false">7 天</button>
+            </div>
+            <div class="filter-group">
+              <span class="filter-label">版本</span>
+              <button id="version-btn" class="btn btn-toggle" type="button" aria-pressed="false">初版 v1</button>
+              <button id="version-not-btn" class="btn btn-toggle" type="button" aria-pressed="false">后续版本</button>
+            </div>
+          </div>
+        </section>
 
-        <section id="list" class="list"></section>
+        <header class="results-toolbar">
+          <div>
+            <div class="section-kicker">READING QUEUE</div>
+            <h2 id="results-heading" tabindex="-1">条目</h2>
+            <p class="meta" id="meta" role="status" aria-live="polite">加载中...</p>
+          </div>
+          <button id="undo-btn" class="btn undo-btn" type="button" disabled>撤销上一步</button>
+        </header>
+
+        <section id="list" class="list" aria-labelledby="results-heading"></section>
         <button id="more" class="btn load-more" type="button" hidden>加载更多</button>
       </section>
-
-    </section>
-  </main>
+    </main>
+  </div>
 
   <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
-  <script src="./js/state.js?v=20260304h"></script>
-  <script src="./js/api.js?v=20260304h"></script>
-  <script src="./js/ui.js?v=20260304h"></script>
-  <script src="./js/app.js?v=20260304h"></script>
+  <script src="./js/state.js?v=20260729b"></script>
+  <script src="./js/api.js?v=20260729b"></script>
+  <script src="./js/ui.js?v=20260729b"></script>
+  <script src="./js/app.js?v=20260729b"></script>
 </body>
 </html>

@@ -52,6 +52,32 @@ class InfoStorageTests(unittest.TestCase):
             with InfoStorage(f"{db_path.as_uri()}?mode=ro") as storage:
                 self.assertEqual(storage.export_entries_json(), [])
 
+    def test_pre_feed_cache_schema_can_open_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "entries.db"
+            with sqlite3.connect(db_path) as conn:
+                conn.executescript(
+                    """
+                    CREATE TABLE tab_entries (
+                        srce_ty TEXT NOT NULL,
+                        srce_id TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1,
+                        favored INTEGER NOT NULL DEFAULT 0,
+                        noticed INTEGER NOT NULL DEFAULT 0,
+                        state_rev INTEGER NOT NULL DEFAULT 0,
+                        updated TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        PRIMARY KEY (srce_ty, srce_id)
+                    );
+                    CREATE INDEX idx_entries_favored ON tab_entries(favored);
+                    CREATE INDEX idx_entries_noticed ON tab_entries(noticed);
+                    CREATE INDEX idx_entries_updated ON tab_entries(updated);
+                    """
+                )
+
+            with InfoStorage(f"{db_path.as_uri()}?mode=ro") as storage:
+                self.assertEqual(storage.export_entries_json(), [])
+
     def test_initialization_repairs_missing_index(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "entries.db"
@@ -69,6 +95,23 @@ class InfoStorageTests(unittest.TestCase):
                     for row in conn.execute("PRAGMA index_list(tab_entries)")
                 }
             self.assertIn("idx_entries_noticed", indexes)
+
+    def test_feed_state_url_must_be_primary_key(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "entries.db"
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE tab_feed_state (
+                        url TEXT,
+                        variant TEXT,
+                        PRIMARY KEY (url, variant)
+                    )
+                    """
+                )
+
+            with self.assertRaisesRegex(RuntimeError, "primary key"):
+                InfoStorage(db_path)
 
     def test_migrates_database_without_noticed_column(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -136,6 +179,52 @@ class InfoStorageTests(unittest.TestCase):
                 self.assertEqual(stored["content"]["titl"], "version 3")
                 self.assertEqual(stored["favored"], 1)
                 self.assertEqual(stored["noticed"], 0)
+
+    def test_insert_entries_rolls_back_whole_batch_on_error(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "entries.db"
+            valid = _entry(version=1)
+            invalid = {**_entry(version=2), "content": {"bad": {1, 2}}}
+            with InfoStorage(db_path) as storage:
+                with self.assertRaises(TypeError), redirect_stdout(io.StringIO()):
+                    storage.insert_entries([valid, invalid])
+                self.assertEqual(storage.export_entries_json(), [])
+
+    def test_equal_version_merges_tags_across_batches(self) -> None:
+        first = _entry(version=1)
+        second = _entry(version=1)
+        second["content"] = {**second["content"], "tags": ["math.NT"]}
+        with InfoStorage(":memory:") as storage:
+            with redirect_stdout(io.StringIO()):
+                storage.insert_entries([first])
+                storage.insert_entries([second])
+
+            stored = storage.export_entries_json()[0]
+
+        self.assertEqual(stored["content"]["tags"], ["math.AG", "math.NT"])
+
+    def test_feed_states_round_trip(self) -> None:
+        with InfoStorage(":memory:") as storage:
+            storage.update_feed_states(
+                {
+                    "https://example.com/feed": {
+                        "etag": "abc",
+                        "last_modified": "yesterday",
+                        "next_fetch_at": 123.5,
+                    }
+                }
+            )
+
+            states = storage.get_feed_states()
+
+        self.assertEqual(
+            states["https://example.com/feed"],
+            {
+                "etag": "abc",
+                "last_modified": "yesterday",
+                "next_fetch_at": 123.5,
+            },
+        )
 
     def test_restore_entry_restores_removed_state_without_downgrade(self) -> None:
         with tempfile.TemporaryDirectory() as td:

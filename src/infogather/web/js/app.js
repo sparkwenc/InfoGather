@@ -27,6 +27,7 @@ const dayBtn = document.getElementById("day-btn");
 const weekBtn = document.getElementById("week-btn");
 const versionBtn = document.getElementById("version-btn");
 const versionNotBtn = document.getElementById("version-not-btn");
+const resultsHeading = document.getElementById("results-heading");
 
 function insElements() {
   return { insPanel, insBtn, insText, insPercent, insBar, insLog };
@@ -46,7 +47,6 @@ function beginMutation() {
   if (state.mutating) return false;
   state.mutating = true;
   listEl.setAttribute("aria-busy", "true");
-  listEl.inert = true;
   renderUndo();
   return true;
 }
@@ -54,7 +54,6 @@ function beginMutation() {
 function endMutation() {
   state.mutating = false;
   listEl.removeAttribute("aria-busy");
-  listEl.inert = false;
   renderUndo();
 }
 
@@ -102,14 +101,25 @@ function entryMatchesMutableFilters(item) {
   );
 }
 
-function updateRenderedEntry(item, card = findRenderedEntry(item)) {
+function updateRenderedEntry(
+  item,
+  card = findRenderedEntry(item),
+  focusedAction = null
+) {
   if (!card?.isConnected) card = findRenderedEntry(item);
   if (!card?.isConnected) return;
   if (!entryMatchesMutableFilters(item)) {
     removeRenderedCard(card, item);
     return;
   }
-  card.replaceWith(makeEntryCard(item));
+  focusedAction ||= card.contains(document.activeElement)
+    ? document.activeElement?.dataset?.action
+    : null;
+  const replacement = makeEntryCard(item);
+  card.replaceWith(replacement);
+  if (focusedAction) {
+    replacement.querySelector(`[data-action="${focusedAction}"]`)?.focus();
+  }
 }
 
 function prependRenderedEntry(item) {
@@ -142,6 +152,7 @@ function startInsPolling() {
 }
 
 function renderTree() {
+  clearTagsEl.disabled = state.selectedSelectors.size === 0;
   ui.renderTree(treeListEl, state, {
     onToggleGroup(groupKey) {
       if (state.collapsedGroups.has(groupKey)) {
@@ -150,6 +161,9 @@ function renderTree() {
         state.collapsedGroups.add(groupKey);
       }
       renderTree();
+      Array.from(treeListEl.querySelectorAll(".tree-group-toggle"))
+        .find((button) => button.dataset.groupKey === groupKey)
+        ?.focus();
     },
     onSelectorChange(selector, checked) {
       if (checked) {
@@ -157,7 +171,9 @@ function renderTree() {
       } else {
         state.selectedSelectors.delete(selector);
       }
-      void refreshFilteredView();
+      clearTagsEl.disabled = state.selectedSelectors.size === 0;
+      ui.setMeta(metaEl, state);
+      void fetchEntries({ reset: true });
     }
   });
 }
@@ -197,6 +213,17 @@ function makeEntryCard(item) {
 
 function renderEntries(items, { reset }) {
   if (reset) {
+    const activeElement = document.activeElement;
+    const activeCard = listEl.contains(activeElement)
+      ? activeElement.closest(".card")
+      : null;
+    const focusTarget = activeCard && activeElement.dataset.action
+      ? {
+          srceTy: activeCard.dataset.sourceType,
+          srceId: activeCard.dataset.sourceId,
+          action: activeElement.dataset.action
+        }
+      : null;
     const fragment = document.createDocumentFragment();
     if (!items.length) {
       const p = document.createElement("p");
@@ -209,6 +236,13 @@ function renderEntries(items, { reset }) {
       });
     }
     listEl.replaceChildren(fragment);
+    if (focusTarget) {
+      const card = findRenderedEntry({
+        srce_ty: focusTarget.srceTy,
+        srce_id: focusTarget.srceId
+      });
+      card?.querySelector(`[data-action="${focusTarget.action}"]`)?.focus();
+    }
     return;
   }
 
@@ -236,8 +270,7 @@ async function pollInsStatus() {
     }
 
     if (wasRunning && job.state === "succeeded") {
-      await loadTagTree();
-      await fetchEntries({ reset: true });
+      await refreshFilteredView();
     }
 
     if (job.state !== "running") {
@@ -272,6 +305,9 @@ async function updateFavored(item, favored, btnEl) {
   const previousRevision = Number(item.state_rev || 0);
   const filterSignature = state.renderedFilterSignature;
   const card = btnEl.closest(".card");
+  const restoreFocus = btnEl.matches(":focus-visible");
+  const focusedAction = restoreFocus ? btnEl.dataset.action : null;
+  let focusUndo = false;
   btnEl.disabled = true;
   try {
     const response = await api.setFavored(
@@ -279,7 +315,7 @@ async function updateFavored(item, favored, btnEl) {
     );
     item.favored = favored;
     item.state_rev = response.state_rev;
-    updateRenderedEntry(item, card);
+    updateRenderedEntry(item, card, focusedAction);
     setLastUndo({
       type: "favored",
       srceTy: item.srce_ty,
@@ -291,6 +327,7 @@ async function updateFavored(item, favored, btnEl) {
       filterSignature: filterSignature,
       label: favored === 1 ? "撤销收藏" : "撤销取消收藏"
     });
+    focusUndo = restoreFocus && !findRenderedEntry(item);
     scheduleMutationRefresh();
   } catch (err) {
     console.error(err);
@@ -299,6 +336,7 @@ async function updateFavored(item, favored, btnEl) {
   } finally {
     btnEl.disabled = false;
     endMutation();
+    if (focusUndo) undoBtn.focus();
   }
 }
 
@@ -308,6 +346,9 @@ async function updateNoticed(item, noticed, btnEl) {
   const previousRevision = Number(item.state_rev || 0);
   const filterSignature = state.renderedFilterSignature;
   const card = btnEl.closest(".card");
+  const restoreFocus = btnEl.matches(":focus-visible");
+  const focusedAction = restoreFocus ? btnEl.dataset.action : null;
+  let focusUndo = false;
   btnEl.disabled = true;
   try {
     const response = await api.setNoticed(
@@ -315,7 +356,7 @@ async function updateNoticed(item, noticed, btnEl) {
     );
     item.noticed = noticed;
     item.state_rev = response.state_rev;
-    updateRenderedEntry(item, card);
+    updateRenderedEntry(item, card, focusedAction);
     setLastUndo({
       type: "noticed",
       srceTy: item.srce_ty,
@@ -327,6 +368,7 @@ async function updateNoticed(item, noticed, btnEl) {
       filterSignature: filterSignature,
       label: noticed === 1 ? "撤销标为已读" : "撤销标为未读"
     });
+    focusUndo = restoreFocus && !findRenderedEntry(item);
     scheduleMutationRefresh();
   } catch (err) {
     console.error(err);
@@ -335,6 +377,7 @@ async function updateNoticed(item, noticed, btnEl) {
   } finally {
     btnEl.disabled = false;
     endMutation();
+    if (focusUndo) undoBtn.focus();
   }
 }
 
@@ -346,6 +389,8 @@ async function removeEntry(item, btnEl) {
 
   if (!beginMutation()) return;
   const card = btnEl.closest(".card");
+  const restoreFocus = btnEl.matches(":focus-visible");
+  let focusUndo = false;
   const filterSignature = state.renderedFilterSignature;
   btnEl.disabled = true;
   try {
@@ -365,6 +410,7 @@ async function removeEntry(item, btnEl) {
       filterSignature: filterSignature,
       label: "撤销移除"
     });
+    focusUndo = restoreFocus;
     scheduleMutationRefresh();
   } catch (err) {
     console.error(err);
@@ -373,15 +419,18 @@ async function removeEntry(item, btnEl) {
   } finally {
     btnEl.disabled = false;
     endMutation();
+    if (focusUndo) undoBtn.focus();
   }
 }
 
 async function undoLastAction() {
   const action = state.lastUndo;
+  const restoreFocus = undoBtn.matches(":focus-visible");
   if (!action || !beginMutation()) return;
 
   state.lastUndo = null;
   renderUndo();
+  let succeeded = false;
   try {
     if (action.type === "favored") {
       await api.setFavored(
@@ -426,6 +475,7 @@ async function undoLastAction() {
       }
     }
     scheduleMutationRefresh();
+    succeeded = true;
   } catch (err) {
     if (![404, 409].includes(err.status) && !state.lastUndo) {
       state.lastUndo = action;
@@ -439,13 +489,19 @@ async function undoLastAction() {
     scheduleMutationRefresh();
   } finally {
     endMutation();
+    if (restoreFocus) {
+      if (!succeeded && state.lastUndo) undoBtn.focus();
+      else resultsHeading.focus();
+    }
   }
 }
 
 async function loadTagTree() {
   const generation = ++state.treeGeneration;
   try {
-    const payload = await api.getTagTree(buildFilterParams());
+    const params = buildFilterParams();
+    params.delete("selectors");
+    const payload = await api.getTagTree(params);
     if (generation !== state.treeGeneration) return;
     const root = payload.root || { name: "配置源", group_count: 0, source_count: 0, count: 0 };
     treeRootEl.textContent = `${root.name}（${root.group_count} 类 / ${root.source_count} 源 / ${root.count} 条）`;
@@ -454,7 +510,7 @@ async function loadTagTree() {
   } catch (err) {
     if (generation !== state.treeGeneration) return;
     treeRootEl.textContent = "配置源 (加载失败)";
-    treeListEl.innerHTML = '<li class="tree-item"><label>无法读取源列表</label></li>';
+    treeListEl.innerHTML = '<li class="tree-item tree-empty">无法读取来源列表</li>';
     console.error(err);
   }
 }
@@ -595,8 +651,7 @@ async function bootstrap() {
   ui.setToggle(versionBtn, false);
   ui.setToggle(versionNotBtn, false);
   await pollInsStatus();
-  await loadTagTree();
-  await fetchEntries({ reset: true });
+  await refreshFilteredView();
 }
 
 void bootstrap();

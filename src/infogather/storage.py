@@ -9,6 +9,7 @@ class InfoStorage:
     def __init__(self, db_path: str | Path) -> None:
         raw_path = str(db_path)
         is_uri = raw_path.startswith("file:")
+        self._read_only = is_uri and "mode=ro" in raw_path
         if raw_path == ":memory:" or is_uri:
             resolved_path = raw_path
         else:
@@ -43,29 +44,69 @@ class InfoStorage:
 
         tot_cnt = len(entries)
         changed_cnt = 0
-
-        for entry in entries:
-            srce_ty = entry["srce_ty"]
-            srce_id = entry["srce_id"]
-            version = entry["version"]
-            favored = entry["favored"]
-            noticed = int(entry.get("noticed", 0))
-            updated = entry["updated"]
-            content = json.dumps(entry["content"], ensure_ascii=False)
-
-            changed = self._upsert_row(
-                srce_ty,
-                srce_id,
-                version,
-                favored,
-                noticed,
-                updated,
-                content,
-            )
-            changed_cnt += changed
+        conn = self._get_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            for entry in entries:
+                changed_cnt += self._upsert_row(
+                    entry["srce_ty"],
+                    entry["srce_id"],
+                    entry["version"],
+                    entry["favored"],
+                    int(entry.get("noticed", 0)),
+                    entry["updated"],
+                    json.dumps(entry["content"], ensure_ascii=False),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
         print(
             f"Insert result: {changed_cnt}/{tot_cnt} inserted or updated")
+
+    def get_feed_states(self) -> dict[str, dict]:
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT url, etag, last_modified, next_fetch_at
+                FROM tab_feed_state
+                """
+            ).fetchall()
+        return {
+            row["url"]: {
+                "etag": row["etag"],
+                "last_modified": row["last_modified"],
+                "next_fetch_at": row["next_fetch_at"],
+            }
+            for row in rows
+        }
+
+    def update_feed_states(self, states: dict[str, dict]) -> None:
+        if not states:
+            return
+        values = [
+            (
+                url,
+                state.get("etag"),
+                state.get("last_modified"),
+                float(state.get("next_fetch_at", 0) or 0),
+            )
+            for url, state in states.items()
+        ]
+        with self._get_conn() as conn:
+            conn.executemany(
+                """
+                INSERT INTO tab_feed_state (
+                    url, etag, last_modified, next_fetch_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(url) DO UPDATE SET
+                    etag = excluded.etag,
+                    last_modified = excluded.last_modified,
+                    next_fetch_at = excluded.next_fetch_at
+                """,
+                values,
+            )
 
     def favor_entry(self, srce_ty: str, srce_id: str, favored: int) -> int:
         """Update favored status for one entry"""
@@ -106,7 +147,13 @@ class InfoStorage:
 
         return self._delete_row(srce_ty, srce_id)
 
-    def pop_entry(self, srce_ty: str, srce_id: str) -> dict | None:
+    def pop_entry(
+        self,
+        srce_ty: str,
+        srce_id: str,
+        *,
+        clear_feed_states: bool = False,
+    ) -> dict | None:
         """Remove and return one entry atomically."""
 
         conn = self._get_conn()
@@ -126,6 +173,8 @@ class InfoStorage:
             entry = None if row is None else self._row_to_entry(row)
             if entry is not None:
                 entry["state_rev"] += 1
+                if clear_feed_states:
+                    conn.execute("DELETE FROM tab_feed_state")
             conn.commit()
             return entry
         except Exception:
@@ -192,9 +241,24 @@ class InfoStorage:
             row["name"]
             for row in conn.execute("PRAGMA index_list(tab_entries)")
         }
-        if (
+        feed_state_info = list(conn.execute("PRAGMA table_info(tab_feed_state)"))
+        feed_state_columns = {row["name"] for row in feed_state_info}
+        feed_state_primary_key = [
+            row["name"]
+            for row in sorted(feed_state_info, key=lambda row: int(row["pk"]))
+            if int(row["pk"]) > 0
+        ]
+        feed_state_url_is_key = feed_state_primary_key == ["url"]
+        has_feed_state = {
+            "url", "etag", "last_modified", "next_fetch_at"
+        }.issubset(feed_state_columns) and feed_state_url_is_key
+        entries_ready = (
             {"noticed", "state_rev"}.issubset(columns)
             and required_indexes.issubset(indexes)
+        )
+        if (
+            entries_ready
+            and (has_feed_state or self._read_only)
         ):
             return
 
@@ -242,6 +306,38 @@ class InfoStorage:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_entries_updated ON tab_entries(updated)"
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS tab_feed_state (
+                    url TEXT PRIMARY KEY,
+                    etag TEXT,
+                    last_modified TEXT,
+                    next_fetch_at REAL NOT NULL DEFAULT 0
+                )
+                """
+            )
+            feed_state_info = list(
+                conn.execute("PRAGMA table_info(tab_feed_state)")
+            )
+            feed_state_columns = {row["name"] for row in feed_state_info}
+            primary_key = [
+                row["name"]
+                for row in sorted(feed_state_info, key=lambda row: int(row["pk"]))
+                if int(row["pk"]) > 0
+            ]
+            url_is_key = primary_key == ["url"]
+            if not url_is_key:
+                raise RuntimeError("tab_feed_state URL must be its primary key")
+            for column, definition in (
+                ("etag", "TEXT"),
+                ("last_modified", "TEXT"),
+                ("next_fetch_at", "REAL NOT NULL DEFAULT 0"),
+            ):
+                if column not in feed_state_columns:
+                    conn.execute(
+                        f"ALTER TABLE tab_feed_state "
+                        f"ADD COLUMN {column} {definition}"
+                    )
             conn.commit()
         except Exception:
             conn.rollback()
@@ -261,24 +357,55 @@ class InfoStorage:
     def _upsert_row(self, srce_ty: str, srce_id: str,
                     version: int, favored: int, noticed: int, updated: str, content: str
                     ) -> int:
-        with self._get_conn() as conn:
-            cur = conn.execute(
-                """
-                INSERT INTO tab_entries (
-                    srce_ty, srce_id, version, favored, noticed, state_rev, updated, content
-                )
-                VALUES (?, ?, ?, ?, ?, 0, ?, ?)
-                ON CONFLICT(srce_ty, srce_id) DO UPDATE SET
-                    version = excluded.version,
-                    noticed = 0,
-                    state_rev = tab_entries.state_rev + 1,
-                    updated = excluded.updated,
-                    content = excluded.content
-                WHERE excluded.version > tab_entries.version
-                """,
-                (srce_ty, srce_id, version, favored, noticed, updated, content),
+        cur = self._get_conn().execute(
+            """
+            INSERT INTO tab_entries (
+                srce_ty, srce_id, version, favored, noticed, state_rev, updated, content
             )
-        return cur.rowcount
+            VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+            ON CONFLICT(srce_ty, srce_id) DO UPDATE SET
+                version = excluded.version,
+                noticed = 0,
+                state_rev = tab_entries.state_rev + 1,
+                updated = excluded.updated,
+                content = excluded.content
+            WHERE excluded.version > tab_entries.version
+            """,
+            (srce_ty, srce_id, version, favored, noticed, updated, content),
+        )
+        if cur.rowcount:
+            return cur.rowcount
+
+        existing = self._get_conn().execute(
+            """
+            SELECT version, content FROM tab_entries
+            WHERE srce_ty = ? AND srce_id = ?
+            """,
+            (srce_ty, srce_id),
+        ).fetchone()
+        if existing is None or existing["version"] != version:
+            return 0
+        existing_content = json.loads(existing["content"])
+        incoming_content = json.loads(content)
+        existing_tags = existing_content.get("tags", []) or []
+        incoming_tags = incoming_content.get("tags", []) or []
+        merged_tags = list(dict.fromkeys([*existing_tags, *incoming_tags]))
+        if merged_tags == existing_tags:
+            return 0
+        existing_content["tags"] = merged_tags
+        updated_row = self._get_conn().execute(
+            """
+            UPDATE tab_entries SET content = ?
+            WHERE srce_ty = ? AND srce_id = ? AND version = ?
+            """,
+            (
+                json.dumps(existing_content, ensure_ascii=False),
+                srce_ty,
+                srce_id,
+                version,
+            ),
+        )
+        return updated_row.rowcount
 
     def _update_row(self, srce_ty: str, srce_id: str,
                     version: int | None = None,

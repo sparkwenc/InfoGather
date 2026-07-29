@@ -23,6 +23,7 @@ from urllib.parse import parse_qs, urlparse
 DEFAULT_CONF_PATH = DEFAULT_CONFIG_PATH
 
 FETCH_PROGRESS_RE = re.compile(r"^\s*(\d+)\s*/\s*(\d+)-")
+SOURCE_PROGRESS_RE = re.compile(r"^SOURCE\s+(\d+)\s*/\s*(\d+):")
 
 INS_LOCK = threading.Lock()
 INS_JOB = {
@@ -143,8 +144,15 @@ def _clear_removed_entry() -> None:
 
 
 def _ins_progress_from_line(line: str, current: int) -> tuple[int, str]:
-    if "Fetching feeds from" in line:
+    if line.startswith("Fetching ") and "feeds" in line:
         return max(current, 8), "开始抓取源"
+
+    source_match = SOURCE_PROGRESS_RE.search(line)
+    if source_match:
+        idx = int(source_match.group(1))
+        total = max(int(source_match.group(2)), 1)
+        progress = 10 + int((idx / total) * 50)
+        return max(current, progress), f"抓取源 {idx}/{total}"
 
     match = FETCH_PROGRESS_RE.search(line)
     if match:
@@ -197,8 +205,11 @@ def _run_ins_job(db_path: str | Path, conf_path: Path) -> None:
         return
 
     assert proc.stdout is not None
+    had_warnings = False
     for raw_line in proc.stdout:
         line = raw_line.rstrip("\n")
+        if line.startswith("SOURCE ") and ": failed " in line:
+            had_warnings = True
         _ins_append_log(line)
         snap = _ins_snapshot()
         progress, message = _ins_progress_from_line(
@@ -210,7 +221,7 @@ def _run_ins_job(db_path: str | Path, conf_path: Path) -> None:
         _ins_update(
             state="succeeded",
             progress=100,
-            message="拉取完成",
+            message="拉取完成，部分源失败" if had_warnings else "拉取完成",
             ended_at=_utcnow_iso(),
             returncode=0,
         )
@@ -718,7 +729,11 @@ class InfoHandler(SimpleHTTPRequestHandler):
         try:
             with REMOVE_UNDO_LOCK:
                 with InfoStorage(str(self._db_path)) as storage:
-                    entry = storage.pop_entry(srce_ty, srce_id)
+                    entry = storage.pop_entry(
+                        srce_ty,
+                        srce_id,
+                        clear_feed_states=True,
+                    )
                 if entry is not None:
                     undo_token = secrets.token_urlsafe(24)
                     REMOVE_UNDO["token"] = undo_token
