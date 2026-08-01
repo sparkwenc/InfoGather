@@ -203,6 +203,53 @@ class InfoStorageTests(unittest.TestCase):
 
         self.assertEqual(stored["content"]["tags"], ["math.AG", "math.NT"])
 
+    def test_equal_version_applies_content_corrections(self) -> None:
+        first = _entry(version=1, title="old title")
+        corrected = _entry(version=1, title="new title")
+        corrected["content"] = {
+            **corrected["content"],
+            "titl": "new title",
+            "abst": "corrected abstract",
+        }
+        with InfoStorage(":memory:") as storage:
+            with redirect_stdout(io.StringIO()) as out:
+                storage.insert_entries([first])
+                storage.insert_entries([corrected])
+            stored = storage.export_entries_json()[0]
+            self.assertIn("1/1 inserted or updated", out.getvalue())
+
+        self.assertEqual(stored["version"], 1)
+        self.assertEqual(stored["content"]["titl"], "new title")
+        self.assertEqual(stored["content"]["abst"], "corrected abstract")
+
+    def test_equal_version_unchanged_content_is_noop(self) -> None:
+        with InfoStorage(":memory:") as storage:
+            with redirect_stdout(io.StringIO()) as out:
+                storage.insert_entries([_entry(version=1)])
+                storage.insert_entries([_entry(version=1)])
+            self.assertIn("0/1 inserted or updated", out.getvalue())
+
+    def test_read_only_legacy_schema_raises_clear_error(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "entries.db"
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE tab_entries (
+                        srce_ty TEXT NOT NULL,
+                        srce_id TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1,
+                        favored INTEGER NOT NULL DEFAULT 0,
+                        updated TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        PRIMARY KEY (srce_ty, srce_id)
+                    )
+                    """
+                )
+
+            with self.assertRaisesRegex(RuntimeError, "read-only"):
+                InfoStorage(f"{db_path.as_uri()}?mode=ro")
+
     def test_feed_states_round_trip(self) -> None:
         with InfoStorage(":memory:") as storage:
             storage.update_feed_states(

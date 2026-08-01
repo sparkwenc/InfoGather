@@ -96,6 +96,9 @@
     card.className = "card";
     card.dataset.sourceType = String(item.srce_ty || "");
     card.dataset.sourceId = String(item.srce_id || "");
+    // Live item reference: card buttons resolve the entry from the card so
+    // optimistic updates (e.g. undo) rebind handlers to the current object.
+    card._liveItem = item;
 
     const head = document.createElement("div");
     head.className = "card-head";
@@ -131,7 +134,7 @@
     favBtn.addEventListener("click", async () => {
       const current = Number(favBtn.dataset.favored || 0);
       const next = current === 1 ? 0 : 1;
-      await handlers.onToggleFavored(item, next, favBtn);
+      await handlers.onToggleFavored(card._liveItem || item, next, favBtn);
     });
 
     const noticeBtn = document.createElement("button");
@@ -148,7 +151,7 @@
     noticeBtn.addEventListener("click", async () => {
       const current = Number(noticeBtn.dataset.noticed || 0);
       const next = current === 1 ? 0 : 1;
-      await handlers.onToggleNoticed(item, next, noticeBtn);
+      await handlers.onToggleNoticed(card._liveItem || item, next, noticeBtn);
     });
 
     const delBtn = document.createElement("button");
@@ -158,7 +161,7 @@
     delBtn.textContent = "移除";
     delBtn.setAttribute("aria-label", `移除《${title}》`);
     delBtn.addEventListener("click", async () => {
-      await handlers.onRemove(item, delBtn);
+      await handlers.onRemove(card._liveItem || item, delBtn);
     });
 
     const actions = document.createElement("div");

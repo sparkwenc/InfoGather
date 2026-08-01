@@ -185,6 +185,7 @@ class InfoSources:
             state_update = InfoSources._feed_state_from_headers(
                 response.headers,
                 previous=state,
+                status_code=response.status_code,
             )
             if response.status_code == 304:
                 return None, state_update
@@ -215,20 +216,38 @@ class InfoSources:
         raise RuntimeError("unreachable feed fetch state")
 
     @staticmethod
-    def _feed_state_from_headers(headers: object, previous: dict) -> dict:
+    def _feed_state_from_headers(
+        headers: object,
+        previous: dict,
+        *,
+        status_code: int | None = None,
+    ) -> dict:
         get_header = getattr(headers, "get")
         cache_control = str(get_header("cache-control", ""))
         directives = cache_control.lower()
         match = re.search(r"(?:^|,)\s*max-age=(\d+)", directives)
+        if match is None:
+            match = re.search(r"(?:^|,)\s*s-maxage=(\d+)", directives)
         max_age = min(int(match.group(1)), 86_400) if match else 0
-        if "no-cache" in directives or "no-store" in directives:
+        no_store = "no-store" in directives
+        no_cache = "no-cache" in directives
+        if no_cache or no_store:
             max_age = 0
         try:
             age = max(0, int(get_header("age", "0")))
         except (TypeError, ValueError):
             age = 0
         fresh_for = max(0, max_age - age)
-        no_store = "no-store" in directives
+        if (
+            fresh_for == 0
+            and not no_cache
+            and not no_store
+            and status_code == 304
+        ):
+            # 304 without any freshness directive: the resource is
+            # unchanged; revalidate after a sane default interval
+            # instead of on every single run.
+            fresh_for = 1800
         return {
             "etag": None if no_store else (
                 get_header("etag") or previous.get("etag")
@@ -260,10 +279,24 @@ class InfoSources:
     @staticmethod
     def _feed_updated_iso(feed: dict) -> str:
         feed_meta = feed.get("feed", {})
-        candidates = [
+        iso = InfoSources._first_parsed_iso(
             feed_meta.get("updated_parsed"),
             feed_meta.get("published_parsed"),
-        ]
+        )
+        return iso or datetime.now(timezone.utc).isoformat()
+
+    @staticmethod
+    def _entry_updated_iso(entry: dict, feed_fallback: str) -> str:
+        """Per-entry update timestamp (paper announcement date), falling
+        back to the feed timestamp when the entry carries no date."""
+        iso = InfoSources._first_parsed_iso(
+            entry.get("updated_parsed"),
+            entry.get("published_parsed"),
+        )
+        return iso or feed_fallback
+
+    @staticmethod
+    def _first_parsed_iso(*candidates: object) -> str | None:
         for candidate in candidates:
             if candidate is None:
                 continue
@@ -275,7 +308,7 @@ class InfoSources:
                 ).isoformat()
             except (TypeError, ValueError, OverflowError):
                 continue
-        return datetime.now(timezone.utc).isoformat()
+        return None
 
     def _normalized_arXiv(self, feeds: list) -> list:
         """normalized arXiv feeds"""
@@ -283,7 +316,7 @@ class InfoSources:
         normalized = []
         for feed in feeds:
             entries = feed.get("entries", [])
-            dt = self._feed_updated_iso(feed)
+            feed_dt = self._feed_updated_iso(feed)
 
             for entry in entries:
                 try:
@@ -314,7 +347,7 @@ class InfoSources:
                     "version": version,
                     "favored": 0,
                     "noticed": 0,
-                    "updated": dt,
+                    "updated": self._entry_updated_iso(entry, feed_dt),
                     "content": {
                         "link": entry.get("link"),
                         "titl": entry.get("title"),
@@ -340,6 +373,8 @@ class InfoSources:
             value = value.split(":", 1)[-1]
 
         value = value.strip("/")
+        if value.lower().startswith("arxiv.org/"):
+            value = value[len("arxiv.org/"):]
         for prefix in ("abs/", "pdf/"):
             if value.lower().startswith(prefix):
                 value = value[len(prefix):]

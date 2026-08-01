@@ -193,6 +193,89 @@ class InfoSourcesTests(unittest.TestCase):
         self.assertIsNone(state["etag"])
         self.assertIsNone(state["last_modified"])
 
+    def test_smaxage_directive_is_honored(self) -> None:
+        before = time.time()
+
+        state = InfoSources._feed_state_from_headers(
+            {"cache-control": "public, s-maxage=300"},
+            previous={},
+        )
+
+        self.assertGreaterEqual(state["next_fetch_at"], before + 299)
+        self.assertLessEqual(state["next_fetch_at"], before + 301)
+
+    def test_304_without_cache_control_gets_default_revalidation(self) -> None:
+        before = time.time()
+
+        state = InfoSources._feed_state_from_headers(
+            {"etag": "abc"},
+            previous={},
+            status_code=304,
+        )
+
+        self.assertGreaterEqual(state["next_fetch_at"], before + 1790)
+        self.assertLessEqual(state["next_fetch_at"], before + 1810)
+
+    def test_304_with_no_cache_stays_immediately_stale(self) -> None:
+        before = time.time()
+
+        state = InfoSources._feed_state_from_headers(
+            {"cache-control": "no-cache", "etag": "abc"},
+            previous={},
+            status_code=304,
+        )
+
+        self.assertLessEqual(state["next_fetch_at"], before + 1)
+
+    def test_normalized_arxiv_uses_entry_timestamp_over_feed(self) -> None:
+        source = InfoSources({})
+        feeds = [
+            {
+                "feed": {"updated_parsed": [2026, 2, 25, 5, 0, 0, 0, 54, 0]},
+                "entries": [
+                    {
+                        "id": "oai:arXiv.org:2601.00005v1",
+                        "summary": "Abstract: Entry date wins.",
+                        "published_parsed": [2026, 2, 23, 5, 0, 0, 0, 54, 0],
+                    }
+                ],
+            }
+        ]
+
+        entries = source._normalized_arXiv(feeds)
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["updated"], "2026-02-23T05:00:00+00:00")
+
+    def test_normalized_arxiv_falls_back_to_feed_timestamp(self) -> None:
+        source = InfoSources({})
+        feeds = [
+            {
+                "feed": {"updated_parsed": [2026, 2, 25, 5, 0, 0, 0, 54, 0]},
+                "entries": [
+                    {
+                        "id": "oai:arXiv.org:2601.00006v1",
+                        "summary": "Abstract: Feed date fallback.",
+                    }
+                ],
+            }
+        ]
+
+        entries = source._normalized_arXiv(feeds)
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["updated"], "2026-02-25T05:00:00+00:00")
+
+    def test_parse_arxiv_id_schemeless_host(self) -> None:
+        self.assertEqual(
+            InfoSources._parse_arxiv_id("arxiv.org/abs/2601.00001v1"),
+            ("2601.00001", 1),
+        )
+        self.assertEqual(
+            InfoSources._parse_arxiv_id("arxiv.org/pdf/math/0301234v2.pdf"),
+            ("math/0301234", 2),
+        )
+
     def test_normalized_arxiv_falls_back_when_feed_timestamp_missing(self) -> None:
         source = InfoSources({})
         feeds = [

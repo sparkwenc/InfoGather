@@ -262,6 +262,12 @@ class InfoStorage:
         ):
             return
 
+        if self._read_only:
+            raise RuntimeError(
+                "read-only database has an outdated schema; "
+                "open it read-write once to migrate"
+            )
+
         try:
             conn.execute("BEGIN IMMEDIATE")
             columns = {
@@ -390,9 +396,18 @@ class InfoStorage:
         existing_tags = existing_content.get("tags", []) or []
         incoming_tags = incoming_content.get("tags", []) or []
         merged_tags = list(dict.fromkeys([*existing_tags, *incoming_tags]))
-        if merged_tags == existing_tags:
+        changed = False
+        if merged_tags != existing_tags:
+            existing_content["tags"] = merged_tags
+            changed = True
+        for key, value in incoming_content.items():
+            if key == "tags":
+                continue
+            if existing_content.get(key) != value:
+                existing_content[key] = value
+                changed = True
+        if not changed:
             return 0
-        existing_content["tags"] = merged_tags
         updated_row = self._get_conn().execute(
             """
             UPDATE tab_entries SET content = ?

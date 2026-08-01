@@ -4,6 +4,7 @@
       offset: 0,
       total: 0,
       loading: false,
+      loadingAppend: false,
       pendingReset: false,
       entriesGeneration: 0,
       treeGeneration: 0,

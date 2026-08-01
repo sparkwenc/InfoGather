@@ -62,7 +62,11 @@ function scheduleMutationRefresh({ entries = false } = {}) {
   if (state.mutationRefreshTimer) {
     clearTimeout(state.mutationRefreshTimer);
   }
-  state.mutationRefreshNeedsEntries ||= entries || state.loading;
+  // An in-flight reset renders pre-mutation data and must be re-run; an
+  // in-flight append only adds untouched items, so let it finish and
+  // refresh the tree instead of resetting the list to page 1.
+  state.mutationRefreshNeedsEntries ||= entries
+    || (state.loading && !state.loadingAppend);
   state.treeGeneration += 1;
   if (state.mutationRefreshNeedsEntries) {
     state.entriesGeneration += 1;
@@ -115,6 +119,9 @@ function entryMatchesMutableFilters(item) {
 function updateRenderedEntry(item, card = findRenderedEntry(item)) {
   if (!card?.isConnected) card = findRenderedEntry(item);
   if (!card?.isConnected) return;
+  // Rebind handlers to the freshest item so later toggles use its current
+  // favored/noticed/state_rev (critical after undo patched a stale object).
+  card._liveItem = item;
   if (!entryMatchesMutableFilters(item)) {
     removeRenderedCard(card, item);
     return;
@@ -197,7 +204,7 @@ function renderTree() {
       }
       clearTagsEl.disabled = state.selectedSelectors.size === 0;
       ui.setMeta(metaEl, state);
-      void fetchEntries({ reset: true });
+      void refreshFilteredView();
     }
   });
 }
@@ -469,7 +476,7 @@ async function undoLastAction() {
     } else if (action.type === "remove") {
       const response = await api.restoreEntry(action.undoToken);
       if (response.already_present) {
-        window.alert("条目已重新存在，可能因当前筛选条件未显示。");
+        window.alert("条目已存在于列表中，无需恢复。");
         needsEntriesRefresh = true;
       } else if (
         action.entry
@@ -521,7 +528,6 @@ async function loadTagTree() {
   const generation = ++state.treeGeneration;
   try {
     const params = buildFilterParams();
-    params.delete("selectors");
     const payload = await api.getTagTree(params);
     if (generation !== state.treeGeneration) return;
     const root = payload.root || { name: "配置源", group_count: 0, source_count: 0, count: 0 };
@@ -546,6 +552,7 @@ async function fetchEntries({ reset = false } = {}) {
   state.loading = true;
   moreEl.disabled = true;
   const queryOffset = reset ? 0 : state.offset;
+  state.loadingAppend = !reset;
 
   const params = buildFilterParams();
   const filterSignature = params.toString();
@@ -583,6 +590,7 @@ async function fetchEntries({ reset = false } = {}) {
     ui.setMeta(metaEl, state);
     ui.setMoreVisible(moreEl, state);
     state.loading = false;
+    state.loadingAppend = false;
     moreEl.disabled = false;
     if (state.pendingReset) {
       state.pendingReset = false;
