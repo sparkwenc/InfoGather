@@ -125,7 +125,11 @@
     favBtn.className = favoredValue === 1 ? "fav-btn on" : "fav-btn";
     favBtn.dataset.action = "favored";
     favBtn.dataset.favored = String(favoredValue);
-    favBtn.textContent = favoredValue === 1 ? "已收藏" : "收藏";
+    favBtn.innerHTML =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+      + 'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+      + '<path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z"/></svg>'
+      + `<span>${favoredValue === 1 ? "已收藏" : "收藏"}</span>`;
     favBtn.setAttribute("aria-pressed", String(favoredValue === 1));
     favBtn.setAttribute(
       "aria-label",
@@ -142,7 +146,11 @@
     noticeBtn.className = noticedValue === 1 ? "notice-btn on" : "notice-btn";
     noticeBtn.dataset.action = "noticed";
     noticeBtn.dataset.noticed = String(noticedValue);
-    noticeBtn.textContent = noticedValue === 1 ? "已读" : "未读";
+    noticeBtn.innerHTML =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+      + 'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+      + '<circle cx="12" cy="12" r="9"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/></svg>'
+      + `<span>${noticedValue === 1 ? "已读" : "未读"}</span>`;
     noticeBtn.setAttribute("aria-pressed", String(noticedValue === 1));
     noticeBtn.setAttribute(
       "aria-label",
@@ -158,7 +166,12 @@
     delBtn.type = "button";
     delBtn.className = "del-btn";
     delBtn.dataset.action = "remove";
-    delBtn.textContent = "移除";
+    delBtn.innerHTML =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+      + 'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+      + '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 002 2h6a2 2 0 002-2l1-12'
+      + 'M9 7V5a2 2 0 012-2h2a2 2 0 012 2v2"/></svg>'
+      + "<span>移除</span>";
     delBtn.setAttribute("aria-label", `移除《${title}》`);
     delBtn.addEventListener("click", async () => {
       await handlers.onRemove(card._liveItem || item, delBtn);

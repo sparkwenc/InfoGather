@@ -132,7 +132,8 @@ function updateRenderedEntry(item, card = findRenderedEntry(item)) {
   if (favoredBtn) {
     favoredBtn.classList.toggle("on", favored);
     favoredBtn.dataset.favored = favored ? "1" : "0";
-    favoredBtn.textContent = favored ? "已收藏" : "收藏";
+    const favLabel = favoredBtn.querySelector("span");
+    if (favLabel) favLabel.textContent = favored ? "已收藏" : "收藏";
     favoredBtn.setAttribute("aria-pressed", String(favored));
     favoredBtn.setAttribute(
       "aria-label",
@@ -144,7 +145,8 @@ function updateRenderedEntry(item, card = findRenderedEntry(item)) {
   if (noticedBtn) {
     noticedBtn.classList.toggle("on", noticed);
     noticedBtn.dataset.noticed = noticed ? "1" : "0";
-    noticedBtn.textContent = noticed ? "已读" : "未读";
+    const noticeLabel = noticedBtn.querySelector("span");
+    if (noticeLabel) noticeLabel.textContent = noticed ? "已读" : "未读";
     noticedBtn.setAttribute("aria-pressed", String(noticed));
     noticedBtn.setAttribute(
       "aria-label",
