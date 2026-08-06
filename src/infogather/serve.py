@@ -1,8 +1,8 @@
 from .storage import InfoStorage
-from .filters import parse_updated, updated_within
 from .paths import DEFAULT_CONFIG_PATH, DEFAULT_DB_PATH, WEB_DIR
 
 import argparse
+import base64
 import json
 import os
 import re
@@ -11,7 +11,6 @@ import subprocess
 import sys
 import threading
 import tomllib
-from collections import Counter
 from datetime import datetime, timedelta, timezone
 from functools import partial
 from http import HTTPStatus
@@ -22,7 +21,6 @@ from urllib.parse import parse_qs, urlparse
 
 DEFAULT_CONF_PATH = DEFAULT_CONFIG_PATH
 
-FETCH_PROGRESS_RE = re.compile(r"^\s*(\d+)\s*/\s*(\d+)-")
 SOURCE_PROGRESS_RE = re.compile(r"^SOURCE\s+(\d+)\s*/\s*(\d+):")
 
 INS_LOCK = threading.Lock()
@@ -37,6 +35,10 @@ INS_JOB = {
 }
 REMOVE_UNDO_LOCK = threading.Lock()
 REMOVE_UNDO = {"token": None, "entry": None}
+MAX_JSON_BODY_BYTES = 64 * 1024
+MAX_CURSOR_BYTES = 16_384
+SQLITE_INT_MIN = -(2 ** 63)
+SQLITE_INT_MAX = 2 ** 63 - 1
 
 
 def _parse_int(raw: str, default: int, *, min_value: int, max_value: int) -> int:
@@ -87,11 +89,77 @@ def _parse_selectors(values: list[str]) -> tuple[set[str], set[str]]:
     return tag_values, source_types
 
 
-def _updated_timestamp(value: str) -> float:
-    dt = parse_updated(value)
-    if dt is None:
-        return float("-inf")
-    return dt.timestamp()
+def _encode_cursor(position: tuple[int, str, str] | None) -> str | None:
+    if position is None:
+        return None
+    _validate_cursor(position)
+    payload = json.dumps(position, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _validate_cursor(value: object) -> tuple[int, str, str]:
+    if (
+        not isinstance(value, (list, tuple))
+        or len(value) != 3
+        or isinstance(value[0], bool)
+        or not isinstance(value[0], int)
+        or not SQLITE_INT_MIN <= value[0] <= SQLITE_INT_MAX
+        or not isinstance(value[1], str)
+        or len(value[1]) > 512
+        or not isinstance(value[2], str)
+        or len(value[2]) > 4096
+    ):
+        raise ValueError("invalid cursor")
+    return value[0], value[1], value[2]
+
+
+def _decode_cursor(raw: str) -> tuple[int, str, str] | None:
+    if not raw:
+        return None
+    if len(raw) > MAX_CURSOR_BYTES:
+        raise ValueError("cursor is too long")
+    try:
+        padded = raw + "=" * (-len(raw) % 4)
+        value = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid cursor") from exc
+    return _validate_cursor(value)
+
+
+def _entry_query_options(query: dict[str, list[str]]) -> dict:
+    updated_within_day = _parse_flag(
+        query.get("updated_within_day", [""])[0]
+    )
+    updated_within_week = _parse_flag(
+        query.get("updated_within_week", [""])[0]
+    )
+    selected_tags, selected_source_types = _parse_selectors(
+        query.get("selectors", [])
+    )
+    selected_tags.update(_parse_tags(query.get("tags", [])))
+    now = datetime.now(timezone.utc)
+    window = None
+    if updated_within_day:
+        window = timedelta(days=1)
+    elif updated_within_week:
+        window = timedelta(days=7)
+    return {
+        "favored": _parse_flag(query.get("favored", [""])[0]),
+        "unnoticed": _parse_flag(query.get("unnoticed", [""])[0]),
+        "updated_since_us": (
+            int((now - window).timestamp() * 1_000_000) if window else None
+        ),
+        "updated_before_us": (
+            int(now.timestamp() * 1_000_000) if window else None
+        ),
+        "version_is_1": _parse_flag(query.get("version_is_1", [""])[0]),
+        "version_is_not_1": _parse_flag(
+            query.get("version_is_not_1", [""])[0]
+        ),
+        "selected_tags": selected_tags,
+        "selected_source_types": selected_source_types,
+        "query_text": query.get("q", [""])[0].strip(),
+    }
 
 
 def _extract_arxiv_tag(url: str) -> str | None:
@@ -154,13 +222,6 @@ def _ins_progress_from_line(line: str, current: int) -> tuple[int, str]:
         progress = 10 + int((idx / total) * 50)
         return max(current, progress), f"抓取源 {idx}/{total}"
 
-    match = FETCH_PROGRESS_RE.search(line)
-    if match:
-        idx = int(match.group(1))
-        total = max(int(match.group(2)), 1)
-        progress = 10 + int((idx / total) * 45)
-        return max(current, progress), f"抓取源 {idx}/{total}"
-
     if "Normalizing feeds..." in line:
         return max(current, 62), "正在归一化"
 
@@ -183,6 +244,7 @@ def _run_ins_job(db_path: str | Path, conf_path: Path) -> None:
     ])
     _ins_append_log(f"$ {' '.join(cmd)}")
 
+    proc = None
     try:
         proc = subprocess.Popen(
             cmd,
@@ -193,39 +255,28 @@ def _run_ins_job(db_path: str | Path, conf_path: Path) -> None:
             errors="replace",
             env=env,
         )
-    except Exception as exc:
-        _ins_update(
-            state="failed",
-            progress=0,
-            message=f"启动失败: {exc}",
-            ended_at=_utcnow_iso(),
-            returncode=-1,
-        )
-        _ins_append_log(f"[error] {exc}")
-        return
+        assert proc.stdout is not None
+        had_warnings = False
+        for raw_line in proc.stdout:
+            line = raw_line.rstrip("\n")
+            if line.startswith("SOURCE ") and ": failed " in line:
+                had_warnings = True
+            _ins_append_log(line)
+            snap = _ins_snapshot()
+            progress, message = _ins_progress_from_line(
+                line, int(snap["progress"]))
+            _ins_update(progress=progress, message=message)
 
-    assert proc.stdout is not None
-    had_warnings = False
-    for raw_line in proc.stdout:
-        line = raw_line.rstrip("\n")
-        if line.startswith("SOURCE ") and ": failed " in line:
-            had_warnings = True
-        _ins_append_log(line)
-        snap = _ins_snapshot()
-        progress, message = _ins_progress_from_line(
-            line, int(snap["progress"]))
-        _ins_update(progress=progress, message=message)
-
-    returncode = proc.wait()
-    if returncode == 0:
-        _ins_update(
-            state="succeeded",
-            progress=100,
-            message="拉取完成，部分源失败" if had_warnings else "拉取完成",
-            ended_at=_utcnow_iso(),
-            returncode=0,
-        )
-    else:
+        returncode = proc.wait()
+        if returncode == 0:
+            _ins_update(
+                state="succeeded",
+                progress=100,
+                message="拉取完成，部分源失败" if had_warnings else "拉取完成",
+                ended_at=_utcnow_iso(),
+                returncode=0,
+            )
+            return
         _ins_update(
             state="failed",
             progress=max(int(_ins_snapshot()["progress"]), 1),
@@ -233,6 +284,22 @@ def _run_ins_job(db_path: str | Path, conf_path: Path) -> None:
             ended_at=_utcnow_iso(),
             returncode=returncode,
         )
+    except Exception as exc:
+        if proc is not None:
+            terminate = getattr(proc, "terminate", None)
+            if callable(terminate):
+                try:
+                    terminate()
+                except OSError:
+                    pass
+        _ins_update(
+            state="failed",
+            progress=max(int(_ins_snapshot()["progress"]), 1),
+            message=f"拉取失败: {exc}",
+            ended_at=_utcnow_iso(),
+            returncode=-1,
+        )
+        _ins_append_log(f"[error] {exc}")
 
 
 def _load_configured_sources(conf_path: Path) -> list[dict]:
@@ -306,10 +373,15 @@ class InfoHandler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(WEB_DIR), **kwargs)
 
     def end_headers(self) -> None:
-        self.send_header(
-            "Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
-        self.send_header("Pragma", "no-cache")
-        self.send_header("Expires", "0")
+        parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/"):
+            self.send_header("Cache-Control", "no-store")
+        elif parsed.path.endswith((".css", ".js")) and "v=" in parsed.query:
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        else:
+            self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "same-origin")
         super().end_headers()
 
     def do_GET(self) -> None:
@@ -329,66 +401,6 @@ class InfoHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/":
             self.path = "/index.html"
         super().do_GET()
-
-    def _build_entry_filter(self, query: dict[str, list[str]]):
-        favored = _parse_flag(query.get("favored", [""])[0])
-        unnoticed = _parse_flag(query.get("unnoticed", [""])[0])
-        updated_within_day = _parse_flag(
-            query.get("updated_within_day", [""])[0])
-        updated_within_week = _parse_flag(
-            query.get("updated_within_week", [""])[0])
-        version_is_1 = _parse_flag(query.get("version_is_1", [""])[0])
-        version_is_not_1 = _parse_flag(
-            query.get("version_is_not_1", [""])[0])
-        selected_tags, selected_source_types = _parse_selectors(
-            query.get("selectors", []))
-        # Backward compatibility for older clients.
-        selected_tags.update(_parse_tags(query.get("tags", [])))
-        q = query.get("q", [""])[0].strip().lower()
-        now = datetime.now(timezone.utc)
-
-        def entry_filter(entry: dict) -> bool:
-            if favored and int(entry.get("favored", 0)) != 1:
-                return False
-            if unnoticed and int(entry.get("noticed", 0)) != 0:
-                return False
-            if version_is_1 and int(entry.get("version", 0)) != 1:
-                return False
-            if version_is_not_1 and int(entry.get("version", 0)) == 1:
-                return False
-
-            if updated_within_day and not updated_within(
-                entry.get("updated"), timedelta(days=1), now=now
-            ):
-                return False
-            if updated_within_week and not updated_within(
-                entry.get("updated"), timedelta(days=7), now=now
-            ):
-                return False
-
-            content = entry.get("content", {})
-            if selected_tags or selected_source_types:
-                entry_tags = set(content.get("tags", []) or [])
-                by_tag = bool(entry_tags.intersection(selected_tags))
-                by_source_type = str(
-                    entry.get("srce_ty", "")) in selected_source_types
-                if not (by_tag or by_source_type):
-                    return False
-
-            if q:
-                haystack = " ".join(
-                    [
-                        str(entry.get("srce_id", "")),
-                        str(content.get("titl", "")),
-                        str(content.get("auth", "")),
-                        str(content.get("abst", "")),
-                        " ".join(map(str, content.get("tags", []) or [])),
-                    ]
-                ).lower()
-                return q in haystack
-            return True
-
-        return entry_filter
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
@@ -417,13 +429,27 @@ class InfoHandler(SimpleHTTPRequestHandler):
         limit = _parse_int(query.get("limit", ["30"])[
                            0], 30, min_value=1, max_value=200)
         offset = _parse_int(query.get("offset", ["0"])[
-                            0], 0, min_value=0, max_value=1_000_000)
-        entry_filter = self._build_entry_filter(query)
+                            0], 0, min_value=0, max_value=2_147_483_647)
+        try:
+            cursor = _decode_cursor(query.get("cursor", [""])[0])
+        except ValueError as exc:
+            self._write_json(
+                {"error": str(exc)},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+        options = _entry_query_options(query)
+        include_total = _parse_flag(query.get("include_total", ["1"])[0])
 
         try:
             with InfoStorage(str(self._db_path)) as storage:
-                all_items = storage.export_entries_json(
-                    entry_filter=entry_filter)
+                result = storage.query_entries(
+                    **options,
+                    limit=limit,
+                    offset=offset,
+                    cursor=cursor,
+                    include_total=cursor is None and include_total,
+                )
         except Exception as exc:
             self._write_json(
                 {"error": f"failed to read database: {exc}"},
@@ -431,27 +457,57 @@ class InfoHandler(SimpleHTTPRequestHandler):
             )
             return
 
-        all_items.sort(
-            key=lambda item: (
-                -_updated_timestamp(str(item.get("updated", ""))),
-                str(item.get("srce_id", "")),
-            )
-        )
-        total = len(all_items)
-        items = all_items[offset: offset + limit]
         self._write_json(
-            {"items": items, "total": total, "limit": limit, "offset": offset}
+            {
+                "items": result["items"],
+                "total": result["total"],
+                "limit": limit,
+                "offset": offset,
+                "has_more": result["has_more"],
+                "next_cursor": _encode_cursor(result["next_position"]),
+            }
         )
 
     def _handle_tag_tree(self, raw_query: str) -> None:
         query = parse_qs(raw_query)
-        entry_filter = self._build_entry_filter(query)
+        options = _entry_query_options(query)
 
         try:
             configured_groups = _load_configured_sources(self._conf_path)
+            configured_tags = {
+                str(child.get("selector_value", ""))
+                for group in configured_groups
+                for child in group.get("children", [])
+                if child.get("selector_type") == "tag"
+            }
+            configured_source_types = {
+                str(child.get("selector_value", ""))
+                for group in configured_groups
+                for child in group.get("children", [])
+                if child.get("selector_type") == "source_type"
+            }
+            group_selectors = []
+            for group in configured_groups:
+                children = group.get("children", [])
+                group_selectors.append((
+                    {
+                        str(child.get("selector_value", ""))
+                        for child in children
+                        if child.get("selector_type") == "tag"
+                    },
+                    {
+                        str(child.get("selector_value", ""))
+                        for child in children
+                        if child.get("selector_type") == "source_type"
+                    },
+                ))
             with InfoStorage(str(self._db_path)) as storage:
-                all_items = storage.export_entries_json(
-                    entry_filter=entry_filter)
+                facets = storage.query_facets(
+                    configured_tags=configured_tags,
+                    configured_source_types=configured_source_types,
+                    groups=group_selectors,
+                    **options,
+                )
         except Exception as exc:
             self._write_json(
                 {"error": f"failed to read database: {exc}"},
@@ -459,66 +515,39 @@ class InfoHandler(SimpleHTTPRequestHandler):
             )
             return
 
-        tag_counter = Counter()
-        source_type_counter = Counter()
-        for entry in all_items:
-            source_type_counter[str(entry.get("srce_ty", ""))] += 1
-            tags = entry.get("content", {}).get("tags", []) or []
-            for tag in tags:
-                if not isinstance(tag, str):
-                    continue
-                clean = tag.strip()
-                if clean:
-                    tag_counter[clean] += 1
-
         groups = []
         total_sources = 0
-        for group in configured_groups:
+        for group_index, group in enumerate(configured_groups):
             srce_ty = str(group.get("name", ""))
             children = []
-            group_count = 0
             for item in group.get("children", []):
                 selector_type = str(item.get("selector_type", ""))
                 selector_value = str(item.get("selector_value", ""))
                 count = 0
                 if selector_type == "tag":
-                    count = int(tag_counter.get(selector_value, 0))
+                    count = int(facets["tag_counts"].get(selector_value, 0))
                 elif selector_type == "source_type":
-                    count = int(source_type_counter.get(selector_value, 0))
+                    count = int(
+                        facets["source_type_counts"].get(selector_value, 0)
+                    )
 
                 children.append(
                     {
                         "name": str(item.get("name", "")),
-                        "url": str(item.get("url", "")),
                         "selector_type": selector_type,
                         "selector_value": selector_value,
                         "count": count,
                     }
                 )
 
-            group_tags = {
-                str(child.get("selector_value", ""))
-                for child in children
-                if child.get("selector_type") == "tag"
-            }
-            group_source_types = {
-                str(child.get("selector_value", ""))
-                for child in children
-                if child.get("selector_type") == "source_type"
-            }
-            matched_entry_keys = set()
-            for entry in all_items:
-                entry_key = f"{entry.get('srce_ty', '')}:{entry.get('srce_id', '')}"
-                entry_source_type = str(entry.get("srce_ty", ""))
-                entry_tags = set(
-                    entry.get("content", {}).get("tags", []) or [])
-                if entry_source_type in group_source_types or entry_tags.intersection(group_tags):
-                    matched_entry_keys.add(entry_key)
-            group_count = len(matched_entry_keys)
-
             total_sources += len(children)
             groups.append(
-                {"name": srce_ty, "count": group_count, "children": children})
+                {
+                    "name": srce_ty,
+                    "count": facets["group_counts"][group_index],
+                    "children": children,
+                }
+            )
 
         self._write_json(
             {
@@ -526,7 +555,7 @@ class InfoHandler(SimpleHTTPRequestHandler):
                     "name": "配置源",
                     "group_count": len(groups),
                     "source_count": total_sources,
-                    "count": len(all_items),
+                    "count": facets["total"],
                 },
                 "groups": groups,
             }
@@ -538,7 +567,7 @@ class InfoHandler(SimpleHTTPRequestHandler):
             length = int(length_raw)
         except ValueError:
             return None
-        if length <= 0:
+        if length <= 0 or length > MAX_JSON_BODY_BYTES:
             return None
         body = self.rfile.read(length)
         try:
@@ -732,7 +761,6 @@ class InfoHandler(SimpleHTTPRequestHandler):
                     entry = storage.pop_entry(
                         srce_ty,
                         srce_id,
-                        clear_feed_states=True,
                     )
                 if entry is not None:
                     undo_token = secrets.token_urlsafe(24)
@@ -864,6 +892,8 @@ def main() -> int:
 
     db_path = _normalize_db_path(args.db_path)
     conf_path = Path(args.conf).expanduser().resolve()
+    with InfoStorage(db_path):
+        pass
     handler = partial(InfoHandler, db_path=db_path, conf_path=conf_path)
     server = ThreadingHTTPServer((args.host, args.port), handler)
     print(

@@ -54,7 +54,7 @@ function beginMutation() {
 
 function endMutation() {
   state.mutating = false;
-  listEl.removeAttribute("aria-busy");
+  if (!state.loading) listEl.removeAttribute("aria-busy");
   renderUndo();
 }
 
@@ -104,7 +104,15 @@ function removeRenderedCard(card, item = null) {
   if (!card?.isConnected) return;
   card.remove();
   state.offset = Math.max(0, state.offset - 1);
-  state.total = Math.max(0, state.total - 1);
+  if (Number.isFinite(state.total)) {
+    state.total = Math.max(0, state.total - 1);
+  }
+  if (!state.hasMore && !listEl.querySelector(".card")) {
+    const empty = document.createElement("p");
+    empty.className = "empty";
+    empty.textContent = "没有匹配的条目。";
+    listEl.replaceChildren(empty);
+  }
   ui.setMeta(metaEl, state);
   ui.setMoreVisible(moreEl, state);
 }
@@ -165,7 +173,7 @@ function prependRenderedEntry(item) {
   if (empty) empty.remove();
   listEl.prepend(makeEntryCard(item));
   state.offset += 1;
-  state.total += 1;
+  if (Number.isFinite(state.total)) state.total += 1;
   ui.setMeta(metaEl, state);
   ui.setMoreVisible(moreEl, state);
 }
@@ -213,7 +221,7 @@ function renderTree() {
 
 function buildFilterParams() {
   const params = new URLSearchParams({
-    q: qEl.value.trim()
+    q: state.appliedQuery
   });
   if (state.favoredOnly) params.set("favored", "1");
   if (state.unnoticedOnly) params.set("unnoticed", "1");
@@ -235,11 +243,7 @@ async function refreshFilteredView() {
 }
 
 function makeEntryCard(item) {
-  const card = ui.makeCard(item, {
-    onToggleFavored: updateFavored,
-    onToggleNoticed: updateNoticed,
-    onRemove: removeEntry
-  });
+  const card = ui.makeCard(item);
   ui.renderMath(card);
   return card;
 }
@@ -280,6 +284,7 @@ function renderEntries(items, { reset }) {
   }
 
   const fragment = document.createDocumentFragment();
+  listEl.querySelector(".empty")?.remove();
   items.forEach((item) => {
     fragment.appendChild(makeEntryCard(item));
   });
@@ -530,10 +535,15 @@ async function loadTagTree() {
   const generation = ++state.treeGeneration;
   try {
     const params = buildFilterParams();
+    const filterSignature = params.toString();
     const payload = await api.getTagTree(params);
     if (generation !== state.treeGeneration) return;
     const root = payload.root || { name: "配置源", group_count: 0, source_count: 0, count: 0 };
     treeRootEl.textContent = `${root.name}（${root.group_count} 类 / ${root.source_count} 源 / ${root.count} 条）`;
+    state.total = Number(root.count || 0);
+    state.totalFilterSignature = filterSignature;
+    ui.setMeta(metaEl, state);
+    ui.setMoreVisible(moreEl, state);
     state.treeGroups = Array.isArray(payload.groups) ? payload.groups : [];
     renderTree();
   } catch (err) {
@@ -552,38 +562,50 @@ async function fetchEntries({ reset = false } = {}) {
     return;
   }
   state.loading = true;
+  listEl.setAttribute("aria-busy", "true");
   moreEl.disabled = true;
-  const queryOffset = reset ? 0 : state.offset;
   state.loadingAppend = !reset;
 
   const params = buildFilterParams();
   const filterSignature = params.toString();
   params.set("limit", String(pageSize));
-  params.set("offset", String(queryOffset));
+  params.set("include_total", "0");
+  if (!reset && state.cursor) params.set("cursor", state.cursor);
 
   try {
     const payload = await api.getEntries(params);
     if (generation !== state.entriesGeneration) return;
     const items = Array.isArray(payload.items) ? payload.items : [];
-    const nextTotal = Number(payload.total || 0);
+    const nextTotal = payload.total == null ? null : Number(payload.total);
 
     renderEntries(items, { reset });
     if (reset) {
       state.offset = items.length;
-      state.total = nextTotal;
+      if (Number.isFinite(nextTotal)) {
+        state.total = nextTotal;
+        state.totalFilterSignature = filterSignature;
+      } else if (state.totalFilterSignature !== filterSignature) {
+        state.total = null;
+      }
       state.renderedFilterSignature = filterSignature;
       state.renderedFavoredOnly = params.get("favored") === "1";
       state.renderedUnnoticedOnly = params.get("unnoticed") === "1";
       state.renderedViewValid = true;
     } else {
       state.offset += items.length;
-      state.total = nextTotal;
+      if (Number.isFinite(nextTotal)) state.total = nextTotal;
     }
+    state.cursor = typeof payload.next_cursor === "string"
+      ? payload.next_cursor
+      : null;
+    state.hasMore = payload.has_more === true;
   } catch (err) {
     if (generation !== state.entriesGeneration) return;
     if (reset || !listEl.children.length) {
       state.offset = 0;
-      state.total = 0;
+      state.total = null;
+      state.cursor = null;
+      state.hasMore = false;
       if (reset) state.renderedViewValid = false;
       listEl.innerHTML = '<p class="empty">读取失败，请确认本地服务已启动。</p>';
     }
@@ -593,6 +615,7 @@ async function fetchEntries({ reset = false } = {}) {
     ui.setMoreVisible(moreEl, state);
     state.loading = false;
     state.loadingAppend = false;
+    if (!state.mutating) listEl.removeAttribute("aria-busy");
     moreEl.disabled = false;
     if (state.pendingReset) {
       state.pendingReset = false;
@@ -603,6 +626,21 @@ async function fetchEntries({ reset = false } = {}) {
 
 insBtn.addEventListener("click", runIns);
 undoBtn.addEventListener("click", undoLastAction);
+listEl.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-action]");
+  const card = button?.closest(".card");
+  const item = card?._liveItem;
+  if (!button || !item) return;
+  if (button.dataset.action === "favored") {
+    const current = Number(button.dataset.favored || 0);
+    void updateFavored(item, current === 1 ? 0 : 1, button);
+  } else if (button.dataset.action === "noticed") {
+    const current = Number(button.dataset.noticed || 0);
+    void updateNoticed(item, current === 1 ? 0 : 1, button);
+  } else if (button.dataset.action === "remove") {
+    void removeEntry(item, button);
+  }
+});
 
 favoredBtn.addEventListener("click", () => {
   state.favoredOnly = !state.favoredOnly;
@@ -619,13 +657,23 @@ if (unnoticedBtn) {
 }
 
 dayBtn.addEventListener("click", () => {
-  state.updatedWithinDay = !state.updatedWithinDay;
+  const next = !state.updatedWithinDay;
+  state.updatedWithinDay = next;
+  if (next) {
+    state.updatedWithinWeek = false;
+    ui.setToggle(weekBtn, false);
+  }
   ui.setToggle(dayBtn, state.updatedWithinDay);
   void refreshFilteredView();
 });
 
 weekBtn.addEventListener("click", () => {
-  state.updatedWithinWeek = !state.updatedWithinWeek;
+  const next = !state.updatedWithinWeek;
+  state.updatedWithinWeek = next;
+  if (next) {
+    state.updatedWithinDay = false;
+    ui.setToggle(dayBtn, false);
+  }
   ui.setToggle(weekBtn, state.updatedWithinWeek);
   void refreshFilteredView();
 });
@@ -660,11 +708,13 @@ clearTagsEl.addEventListener("click", () => {
 });
 
 searchEl.addEventListener("click", () => {
+  state.appliedQuery = qEl.value.trim();
   void refreshFilteredView();
 });
 
 qEl.addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
+    state.appliedQuery = qEl.value.trim();
     void refreshFilteredView();
   }
 });

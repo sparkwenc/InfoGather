@@ -1,12 +1,13 @@
 (function (global) {
   let cardSequence = 0;
+  const dateFormatter = new Intl.DateTimeFormat("zh-CN", {
+    dateStyle: "medium",
+    timeStyle: "short"
+  });
 
   function fmtDate(iso) {
     try {
-      return new Intl.DateTimeFormat("zh-CN", {
-        dateStyle: "medium",
-        timeStyle: "short"
-      }).format(new Date(iso));
+      return dateFormatter.format(new Date(iso));
     } catch {
       return iso || "";
     }
@@ -14,6 +15,7 @@
 
   function renderMath(node) {
     if (!window.renderMathInElement) return;
+    if (!/(\$|\\\(|\\\[)/.test(node.textContent || "")) return;
     window.renderMathInElement(node, {
       delimiters: [
         { left: "$$", right: "$$", display: true },
@@ -33,13 +35,17 @@
 
   function setMeta(metaEl, state) {
     const selected = state.selectedSelectors.size;
-    const shown = Math.min(state.offset, state.total);
     const suffix = selected ? `，已选源 ${selected} 个` : "";
-    metaEl.textContent = `共 ${state.total} 条，当前显示 ${shown} 条${suffix}`;
+    if (Number.isFinite(state.total)) {
+      const shown = Math.min(state.offset, state.total);
+      metaEl.textContent = `共 ${state.total} 条，当前显示 ${shown} 条${suffix}`;
+    } else {
+      metaEl.textContent = `当前显示 ${state.offset} 条${suffix}`;
+    }
   }
 
   function setMoreVisible(moreEl, state) {
-    moreEl.hidden = state.offset >= state.total;
+    moreEl.hidden = !state.hasMore;
   }
 
   function renderInsJob(elements, job) {
@@ -87,7 +93,7 @@
     }
   }
 
-  function makeCard(item, handlers) {
+  function makeCard(item) {
     const c = item.content || {};
     const favoredValue = Number(item.favored || 0);
     const noticedValue = Number(item.noticed || 0);
@@ -135,12 +141,6 @@
       "aria-label",
       favoredValue === 1 ? `取消收藏《${title}》` : `收藏《${title}》`
     );
-    favBtn.addEventListener("click", async () => {
-      const current = Number(favBtn.dataset.favored || 0);
-      const next = current === 1 ? 0 : 1;
-      await handlers.onToggleFavored(card._liveItem || item, next, favBtn);
-    });
-
     const noticeBtn = document.createElement("button");
     noticeBtn.type = "button";
     noticeBtn.className = noticedValue === 1 ? "notice-btn on" : "notice-btn";
@@ -156,12 +156,6 @@
       "aria-label",
       noticedValue === 1 ? `标记《${title}》为未读` : `标记《${title}》为已读`
     );
-    noticeBtn.addEventListener("click", async () => {
-      const current = Number(noticeBtn.dataset.noticed || 0);
-      const next = current === 1 ? 0 : 1;
-      await handlers.onToggleNoticed(card._liveItem || item, next, noticeBtn);
-    });
-
     const delBtn = document.createElement("button");
     delBtn.type = "button";
     delBtn.className = "del-btn";
@@ -173,10 +167,6 @@
       + 'M9 7V5a2 2 0 012-2h2a2 2 0 012 2v2"/></svg>'
       + "<span>移除</span>";
     delBtn.setAttribute("aria-label", `移除《${title}》`);
-    delBtn.addEventListener("click", async () => {
-      await handlers.onRemove(card._liveItem || item, delBtn);
-    });
-
     const actions = document.createElement("div");
     actions.className = "card-actions";
     actions.appendChild(noticeBtn);

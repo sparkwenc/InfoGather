@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 import httpx
 
-from infogather.sources import InfoSources
+from infogather.sources import InfoSources, MAX_FEED_BYTES
 
 
 class InfoSourcesTests(unittest.TestCase):
@@ -78,6 +78,62 @@ class InfoSourcesTests(unittest.TestCase):
         self.assertEqual(parse.call_count, 1)
         sleep.assert_called_once_with(0)
 
+    def test_fetch_feed_retries_timeout(self) -> None:
+        feed = {"entries": []}
+        client = Mock()
+        client.get.side_effect = [
+            httpx.ReadTimeout("timed out"),
+            httpx.Response(200),
+        ]
+        with (
+            patch("infogather.sources.feedparser.parse", return_value=feed),
+            patch("infogather.sources.time.sleep") as sleep,
+            patch("builtins.print"),
+        ):
+            result, _ = InfoSources._fetch_feed(
+                client,
+                "https://rss.arxiv.org/rss/math.NT",
+                "Number Theory",
+                attempts=2,
+                delay=0,
+            )
+
+        self.assertIs(result, feed)
+        self.assertEqual(client.get.call_count, 2)
+        sleep.assert_called_once_with(0)
+
+    def test_fetch_feed_rejects_oversized_response(self) -> None:
+        client = Mock()
+        client.get.return_value = httpx.Response(
+            200,
+            headers={"content-length": str(MAX_FEED_BYTES + 1)},
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "too large"):
+            InfoSources._fetch_feed(
+                client,
+                "https://rss.arxiv.org/rss/math.NT",
+                "Number Theory",
+            )
+
+    def test_fetch_feed_streaming_cap_handles_chunked_response(self) -> None:
+        class OversizedStream(httpx.SyncByteStream):
+            def __iter__(self):
+                yield b"x" * MAX_FEED_BYTES
+                yield b"x"
+
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, stream=OversizedStream())
+
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            with self.assertRaisesRegex(RuntimeError, "too large"):
+                InfoSources._fetch_feed(
+                    client,
+                    "https://rss.arxiv.org/rss/math.NT",
+                    "Number Theory",
+                    attempts=1,
+                )
+
     def test_fetch_feed_rejects_bozo_result_with_partial_entries(self) -> None:
         malformed = {
             "bozo": True,
@@ -108,6 +164,7 @@ class InfoSourcesTests(unittest.TestCase):
                 "cache-control": "max-age=120",
                 "age": "90",
                 "etag": "new",
+                "content-length": str(MAX_FEED_BYTES + 1),
             },
         )
 
@@ -169,6 +226,7 @@ class InfoSourcesTests(unittest.TestCase):
 
         self.assertEqual(merged[0]["content"]["tags"], ["math.AG", "math.NT"])
         self.assertIs(latest[0], newer)
+        self.assertEqual(latest[0]["content"]["tags"], ["math.AG", "math.DG", "math.NT"])
 
     def test_no_cache_response_is_immediately_stale(self) -> None:
         before = time.time()
@@ -215,6 +273,16 @@ class InfoSourcesTests(unittest.TestCase):
 
         self.assertGreaterEqual(state["next_fetch_at"], before + 1790)
         self.assertLessEqual(state["next_fetch_at"], before + 1810)
+
+    def test_200_without_validators_drops_previous_validators(self) -> None:
+        state = InfoSources._feed_state_from_headers(
+            {},
+            previous={"etag": "old", "last_modified": "yesterday"},
+            status_code=200,
+        )
+
+        self.assertIsNone(state["etag"])
+        self.assertIsNone(state["last_modified"])
 
     def test_304_with_no_cache_stays_immediately_stale(self) -> None:
         before = time.time()

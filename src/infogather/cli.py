@@ -13,11 +13,20 @@ DEFAULT_OUTPUT = DEFAULT_OUTPUT_PATH
 def _cmd_ins(args: argparse.Namespace) -> int:
     with open(args.conf, "rb") as f:
         conf = tomllib.load(f)
+    configured_urls = {
+        str(source.get("url", "")).strip()
+        for sources in conf.values()
+        if isinstance(sources, list)
+        for source in sources
+        if isinstance(source, dict) and str(source.get("url", "")).strip()
+    }
     with InfoStorage(args.db_path) as storage:
-        sources = InfoSources(conf, feed_states=storage.get_feed_states())
+        sources = InfoSources(
+            conf,
+            feed_states=storage.get_feed_states(configured_urls),
+        )
         entries = sources.get_normalized_feeds()
-        storage.insert_entries(entries)
-        storage.update_feed_states(sources.feed_state_updates)
+        storage.insert_entries(entries, sources.feed_state_updates)
     return 0
 
 

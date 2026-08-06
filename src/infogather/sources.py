@@ -10,6 +10,9 @@ from urllib.parse import urlparse
 import httpx
 
 
+MAX_FEED_BYTES = 8 * 1024 * 1024
+
+
 class InfoSources:
     def __init__(
         self,
@@ -30,14 +33,12 @@ class InfoSources:
         print("Normalizing feeds...")
         normalized = []
 
-        cnt_n = 0
         for srce_ty, feeds in raw_feeds.items():
             fn = getattr(self, f"_normalized_{srce_ty}", None)
             if fn is None or not callable(fn):
                 print(f"{srce_ty:5s}: unknown source type, skipped")
                 continue
             result = fn(feeds)
-            cnt_n += len(result)
             print(f"{srce_ty:5s}: {len(result):3d} normalized")
             normalized.extend(result)
         deduplicated = self._deduplicate_entries(normalized)
@@ -169,51 +170,109 @@ class InfoSources:
 
         for attempt in range(1, attempts + 1):
             try:
-                response = client.get(url, headers=headers)
+                status_code, response_headers, response_content = (
+                    InfoSources._read_feed_response(
+                        client, url, headers=headers, name=name
+                    )
+                )
             except (http.client.IncompleteRead, httpx.TransportError) as exc:
-                if isinstance(exc, httpx.TimeoutException):
-                    raise
                 if attempt >= attempts:
                     raise
                 print(
                     f"      {name}: transport error ({exc}), "
                     f"retrying {attempt + 1}/{attempts}"
                 )
-                time.sleep(delay)
+                time.sleep(delay * (2 ** (attempt - 1)))
                 continue
 
             state_update = InfoSources._feed_state_from_headers(
-                response.headers,
+                response_headers,
                 previous=state,
-                status_code=response.status_code,
+                status_code=status_code,
             )
-            if response.status_code == 304:
+            if status_code == 304:
                 return None, state_update
 
-            if response.status_code >= 400:
+            if status_code < 200 or status_code >= 300:
                 error = RuntimeError(
-                    f"{name}: feed request failed with HTTP {response.status_code}"
+                    f"{name}: feed request failed with HTTP {status_code}"
                 )
                 retryable = (
-                    response.status_code in {408, 425, 429}
-                    or response.status_code >= 500
+                    status_code in {408, 425, 429}
+                    or status_code >= 500
                 )
                 if not retryable or attempt >= attempts:
                     raise error
                 print(f"      {error}, retrying {attempt + 1}/{attempts}")
-                time.sleep(delay)
+                retry_after = response_headers.get("retry-after", "")
+                try:
+                    wait = min(max(float(retry_after), 0), 60)
+                except (TypeError, ValueError):
+                    wait = delay * (2 ** (attempt - 1))
+                time.sleep(wait)
                 continue
 
             feed = feedparser.parse(
-                response.content,
-                response_headers=dict(response.headers),
+                response_content,
+                response_headers=dict(response_headers),
             )
             if feed.get("bozo"):
                 detail = feed.get("bozo_exception", "parse error")
+                if attempt < attempts:
+                    print(
+                        f"      {name}: invalid feed ({detail}), "
+                        f"retrying {attempt + 1}/{attempts}"
+                    )
+                    time.sleep(delay * (2 ** (attempt - 1)))
+                    continue
                 raise RuntimeError(f"{name}: invalid feed: {detail}")
             return feed, state_update
 
         raise RuntimeError("unreachable feed fetch state")
+
+    @staticmethod
+    def _read_feed_response(
+        client: httpx.Client,
+        url: str,
+        *,
+        headers: dict[str, str],
+        name: str,
+    ) -> tuple[int, object, bytes]:
+        # Tests and callers may provide a minimal client double. Production
+        # httpx clients use streaming so the cap applies before buffering.
+        if not isinstance(client, httpx.Client):
+            response = client.get(url, headers=headers)
+            if response.status_code == 304 or not 200 <= response.status_code < 300:
+                return response.status_code, response.headers, b""
+            InfoSources._validate_content_length(response.headers, name)
+            content = response.content
+            if len(content) > MAX_FEED_BYTES:
+                raise RuntimeError(f"{name}: feed response is too large")
+            return response.status_code, response.headers, content
+
+        with client.stream("GET", url, headers=headers) as response:
+            response_headers = httpx.Headers(response.headers)
+            if response.status_code == 304 or not 200 <= response.status_code < 300:
+                return response.status_code, response_headers, b""
+            InfoSources._validate_content_length(response_headers, name)
+            body = bytearray()
+            for chunk in response.iter_bytes():
+                if len(body) + len(chunk) > MAX_FEED_BYTES:
+                    raise RuntimeError(f"{name}: feed response is too large")
+                body.extend(chunk)
+            return response.status_code, response_headers, bytes(body)
+
+    @staticmethod
+    def _validate_content_length(headers: object, name: str) -> None:
+        raw_length = getattr(headers, "get")("content-length")
+        if not raw_length:
+            return
+        try:
+            too_large = int(raw_length) > MAX_FEED_BYTES
+        except (TypeError, ValueError):
+            return
+        if too_large:
+            raise RuntimeError(f"{name}: feed response is too large")
 
     @staticmethod
     def _feed_state_from_headers(
@@ -250,10 +309,15 @@ class InfoSources:
             fresh_for = 1800
         return {
             "etag": None if no_store else (
-                get_header("etag") or previous.get("etag")
+                get_header("etag")
+                or (previous.get("etag") if status_code == 304 else None)
             ),
             "last_modified": None if no_store else (
-                get_header("last-modified") or previous.get("last_modified")
+                get_header("last-modified")
+                or (
+                    previous.get("last_modified")
+                    if status_code == 304 else None
+                )
             ),
             "next_fetch_at": time.time() + fresh_for,
         }
@@ -264,16 +328,17 @@ class InfoSources:
         for entry in entries:
             key = (entry["srce_ty"], entry["srce_id"])
             existing = unique.get(key)
-            if existing is None or entry["version"] > existing["version"]:
+            if existing is None:
                 unique[key] = entry
-                continue
-            if entry["version"] != existing["version"]:
                 continue
             existing_tags = existing["content"].get("tags", [])
             incoming_tags = entry["content"].get("tags", [])
-            existing["content"]["tags"] = list(
-                dict.fromkeys([*existing_tags, *incoming_tags])
-            )
+            merged_tags = sorted(set([*existing_tags, *incoming_tags]))
+            if entry["version"] > existing["version"]:
+                entry["content"]["tags"] = merged_tags
+                unique[key] = entry
+            else:
+                existing["content"]["tags"] = merged_tags
         return list(unique.values())
 
     @staticmethod

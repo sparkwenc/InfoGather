@@ -2,7 +2,10 @@
   function createState() {
     return {
       offset: 0,
-      total: 0,
+      total: null,
+      cursor: null,
+      hasMore: false,
+      appliedQuery: "",
       loading: false,
       loadingAppend: false,
       pendingReset: false,
@@ -22,6 +25,7 @@
       mutationRefreshTimer: null,
       mutationRefreshNeedsEntries: false,
       renderedFilterSignature: "",
+      totalFilterSignature: "",
       renderedFavoredOnly: false,
       renderedUnnoticedOnly: false,
       renderedViewValid: false,
