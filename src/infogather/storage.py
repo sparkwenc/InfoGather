@@ -7,7 +7,7 @@ from typing import Callable
 from .filters import parse_updated
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 BUSY_TIMEOUT_MS = 10_000
 
 
@@ -62,37 +62,20 @@ class InfoStorage:
         changed_cnt = 0
         prepared = [self._prepare_entry(entry) for entry in entries]
         conn = self._get_conn()
-        try:
+        with conn:
             conn.execute("BEGIN IMMEDIATE")
             for entry in prepared:
                 changed_cnt += self._upsert_row(**entry)
             self._update_feed_states(feed_states or {})
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
 
         print(
             f"Insert result: {changed_cnt}/{tot_cnt} inserted or updated")
 
-    def get_feed_states(self, urls: set[str] | None = None) -> dict[str, dict]:
-        base_sql = (
-            "SELECT url, etag, last_modified, next_fetch_at "
-            "FROM tab_feed_state"
-        )
+    def get_feed_states(self) -> dict[str, dict]:
         with self._get_conn() as conn:
-            if urls is None:
-                rows = conn.execute(base_sql).fetchall()
-            else:
-                ordered_urls = sorted(urls)
-                rows = []
-                for start in range(0, len(ordered_urls), 900):
-                    batch = ordered_urls[start:start + 900]
-                    placeholders = ",".join("?" for _ in batch)
-                    rows.extend(conn.execute(
-                        f"{base_sql} WHERE url IN ({placeholders})",
-                        batch,
-                    ).fetchall())
+            rows = conn.execute(
+                "SELECT url, etag, last_modified, next_fetch_at FROM tab_feed_state"
+            ).fetchall()
         return {
             row["url"]: {
                 "etag": row["etag"],
@@ -111,12 +94,13 @@ class InfoStorage:
     def favor_entry(self, srce_ty: str, srce_id: str, favored: int) -> int:
         """Update favored status for one entry"""
 
-        return self._update_row(srce_ty, srce_id, favored=favored)
-
-    def notice_entry(self, srce_ty: str, srce_id: str, noticed: int) -> int:
-        """Update noticed status for one entry"""
-
-        return self._update_row(srce_ty, srce_id, noticed=noticed)
+        with self._get_conn() as conn:
+            cur = conn.execute(
+                "UPDATE tab_entries SET favored = ?, state_rev = state_rev + 1 "
+                "WHERE srce_ty = ? AND srce_id = ?",
+                (favored, srce_ty, srce_id),
+            )
+        return cur.rowcount
 
     def favor_entry_if_current(
         self,
@@ -142,11 +126,6 @@ class InfoStorage:
             srce_ty, srce_id, "noticed", expected, expected_revision, noticed
         )
 
-    def remove_entry(self, srce_ty: str, srce_id: str) -> int:
-        """Remove one entry"""
-
-        return int(self.pop_entry(srce_ty, srce_id) is not None)
-
     def pop_entry(
         self,
         srce_ty: str,
@@ -155,12 +134,11 @@ class InfoStorage:
         """Remove and return one entry atomically."""
 
         conn = self._get_conn()
-        try:
+        with conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """
                 SELECT
-                    entry_pk,
                     srce_ty, srce_id, version, favored, noticed,
                     state_rev, updated, content
                 FROM tab_entries
@@ -171,23 +149,11 @@ class InfoStorage:
             entry = None if row is None else self._row_to_entry(row)
             if entry is not None:
                 conn.execute(
-                    "DELETE FROM tab_entries_fts WHERE rowid = ?",
-                    (row["entry_pk"],),
-                )
-                conn.execute(
-                    "DELETE FROM tab_entry_tags WHERE entry_pk = ?",
-                    (row["entry_pk"],),
-                )
-                conn.execute(
-                    "DELETE FROM tab_entries WHERE entry_pk = ?",
-                    (row["entry_pk"],),
+                    "DELETE FROM tab_entries WHERE srce_ty = ? AND srce_id = ?",
+                    (srce_ty, srce_id),
                 )
                 entry["state_rev"] += 1
-            conn.commit()
             return entry
-        except Exception:
-            conn.rollback()
-            raise
 
     def restore_entry(self, entry: dict) -> int:
         """Restore a removed entry unless it has already been reinserted."""
@@ -252,17 +218,6 @@ class InfoStorage:
             f"with {entry_filter.__name__}"
         )
 
-    def export_entries_json(
-        self,
-        entry_filter: Callable[[dict], bool] | None = None,
-    ) -> list[dict]:
-        """Export entries as JSON-friendly dictionaries for read-only interfaces."""
-
-        entries = [self._row_to_entry(row) for row in self._fetch_all()]
-        if entry_filter is None:
-            return entries
-        return [entry for entry in entries if entry_filter(entry)]
-
     def query_entries(
         self,
         *,
@@ -276,7 +231,6 @@ class InfoStorage:
         selected_source_types: set[str] | None = None,
         query_text: str = "",
         limit: int = 30,
-        offset: int = 0,
         cursor: tuple[int, str, str] | None = None,
         include_total: bool = True,
     ) -> dict:
@@ -313,7 +267,7 @@ class InfoStorage:
             )
 
         conn = self._get_conn()
-        try:
+        with conn:
             conn.execute("BEGIN")
             total = None
             if include_total:
@@ -332,14 +286,7 @@ class InfoStorage:
                 LIMIT ?
             """
             page_params.append(limit + 1)
-            if cursor is None and offset:
-                sql += " OFFSET ?"
-                page_params.append(offset)
             rows = conn.execute(sql, page_params).fetchall()
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
 
         has_more = len(rows) > limit
         rows = rows[:limit]
@@ -366,46 +313,32 @@ class InfoStorage:
         groups: list[tuple[set[str], set[str]]],
         **filters: object,
     ) -> dict:
-        """Count configured facets without loading entry JSON."""
+        """Count configured facets from canonical entry JSON."""
 
         where, params = self._entry_filter_sql(**filters)
-        where_sql = self._where_sql(where)
         conn = self._get_conn()
-        conn.execute(
-            """
-            CREATE TEMP TABLE IF NOT EXISTS temp_filtered_entries (
-                entry_pk INTEGER PRIMARY KEY,
-                srce_ty TEXT NOT NULL
-            ) WITHOUT ROWID
-            """
-        )
-        try:
+        with conn:
             conn.execute("BEGIN")
-            conn.execute("DELETE FROM temp_filtered_entries")
-            conn.execute(
-                f"""
-                INSERT INTO temp_filtered_entries (entry_pk, srce_ty)
-                SELECT e.entry_pk, e.srce_ty
-                FROM tab_entries AS e{where_sql}
-                """,
-                params,
-            )
             total = conn.execute(
-                "SELECT COUNT(*) FROM temp_filtered_entries"
+                f"SELECT COUNT(*) FROM tab_entries AS e{self._where_sql(where)}",
+                params,
             ).fetchone()[0]
             tag_counts: dict[str, int] = {}
             if configured_tags:
                 placeholders = ",".join("?" for _ in configured_tags)
                 rows = conn.execute(
                     f"""
-                    SELECT t.tag, COUNT(*) AS entry_count
-                    FROM temp_filtered_entries AS filtered
-                    JOIN tab_entry_tags AS t
-                      ON t.entry_pk = filtered.entry_pk
-                    WHERE t.tag IN ({placeholders})
-                    GROUP BY t.tag
+                    SELECT t.value AS tag, COUNT(DISTINCT e.rowid) AS entry_count
+                    FROM tab_entries AS e
+                    JOIN json_each(e.content, '$.tags') AS t
+                    {self._where_sql([
+                        *where,
+                        "t.type = 'text'",
+                        f"t.value IN ({placeholders})",
+                    ])}
+                    GROUP BY t.value
                     """,
-                    sorted(configured_tags),
+                    [*params, *sorted(configured_tags)],
                 ).fetchall()
                 tag_counts = {
                     str(row["tag"]): int(row["entry_count"]) for row in rows
@@ -415,36 +348,37 @@ class InfoStorage:
                 placeholders = ",".join("?" for _ in configured_source_types)
                 rows = conn.execute(
                     f"""
-                    SELECT filtered.srce_ty, COUNT(*) AS entry_count
-                    FROM temp_filtered_entries AS filtered
-                    WHERE filtered.srce_ty IN ({placeholders})
-                    GROUP BY filtered.srce_ty
+                    SELECT e.srce_ty, COUNT(*) AS entry_count
+                    FROM tab_entries AS e
+                    {self._where_sql([
+                        *where,
+                        f"e.srce_ty IN ({placeholders})",
+                    ])}
+                    GROUP BY e.srce_ty
                     """,
-                    sorted(configured_source_types),
+                    [*params, *sorted(configured_source_types)],
                 ).fetchall()
                 source_type_counts = {
                     str(row["srce_ty"]): int(row["entry_count"]) for row in rows
                 }
 
+            # ponytail: repeated scans avoid duplicate indexes; add measured
+            # materialized indexes only if facet latency becomes visible.
             group_counts = []
             for group_tags, group_source_types in groups:
                 group_clause, group_params = self._selector_sql(
-                    group_tags, group_source_types, alias="filtered"
+                    group_tags, group_source_types
                 )
                 if not group_clause:
                     group_counts.append(0)
                     continue
                 group_counts.append(
                     int(conn.execute(
-                        "SELECT COUNT(*) FROM temp_filtered_entries AS filtered "
-                        f"WHERE {group_clause}",
-                        group_params,
+                        "SELECT COUNT(*) FROM tab_entries AS e"
+                        f"{self._where_sql([*where, group_clause])}",
+                        [*params, *group_params],
                     ).fetchone()[0])
                 )
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
         return {
             "total": int(total),
             "tag_counts": tag_counts,
@@ -538,12 +472,9 @@ class InfoStorage:
             "idx_entries_page",
             "idx_entries_favored_page",
         }
-        entry_table_info = list(conn.execute("PRAGMA table_info(tab_entries)"))
-        columns = {row["name"] for row in entry_table_info}
-        entry_pk_is_primary = any(
-            row["name"] == "entry_pk" and int(row["pk"]) > 0
-            for row in entry_table_info
-        )
+        columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(tab_entries)")
+        }
         indexes = {
             row["name"]
             for row in conn.execute("PRAGMA index_list(tab_entries)")
@@ -559,39 +490,13 @@ class InfoStorage:
         has_feed_state = {
             "url", "etag", "last_modified", "next_fetch_at"
         }.issubset(feed_state_columns) and feed_state_url_is_key
-        tables = {
-            row["name"]
-            for row in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')"
-            )
-        }
         schema_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
         entries_ready = {
-            "entry_pk", "noticed", "state_rev", "updated_at_us"
-        }.issubset(columns) and required_indexes.issubset(indexes) and (
-            entry_pk_is_primary or "idx_entries_pk" in indexes
-        )
-        auxiliary_data_ready = {
-            "tab_entry_tags", "tab_entries_fts"
-        }.issubset(tables)
-        tag_columns = {
-            row["name"]
-            for row in conn.execute("PRAGMA table_info(tab_entry_tags)")
-        }
-        tag_indexes = {
-            row["name"]
-            for row in conn.execute("PRAGMA index_list(tab_entry_tags)")
-        }
-        auxiliary_data_ready = auxiliary_data_ready and {
-            "entry_pk", "tag"
-        }.issubset(tag_columns)
-        auxiliary_ready = (
-            auxiliary_data_ready and "idx_entry_tags_tag" in tag_indexes
-        )
+            "srce_ty", "srce_id", "noticed", "state_rev", "updated_at_us"
+        }.issubset(columns) and required_indexes.issubset(indexes)
         if (
             schema_version >= SCHEMA_VERSION
             and entries_ready
-            and auxiliary_ready
             and has_feed_state
         ):
             return
@@ -602,12 +507,11 @@ class InfoStorage:
                 "open it read-write once to migrate"
             )
 
-        try:
+        with conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS tab_entries (
-                    entry_pk INTEGER PRIMARY KEY,
                     srce_ty TEXT NOT NULL,
                     srce_id TEXT NOT NULL,
                     version INTEGER NOT NULL DEFAULT 1,
@@ -617,6 +521,7 @@ class InfoStorage:
                     updated TEXT NOT NULL,
                     updated_at_us INTEGER NOT NULL DEFAULT 0,
                     content TEXT NOT NULL,
+                    PRIMARY KEY (srce_ty, srce_id),
                     CHECK (version >= 1),
                     CHECK (favored IN (0, 1)),
                     CHECK (noticed IN (0, 1)),
@@ -639,17 +544,7 @@ class InfoStorage:
                     "ALTER TABLE tab_entries "
                     "ADD COLUMN state_rev INTEGER NOT NULL DEFAULT 0"
                 )
-            needs_backfill = schema_version < SCHEMA_VERSION
-            if "entry_pk" not in columns:
-                conn.execute("ALTER TABLE tab_entries ADD COLUMN entry_pk INTEGER")
-                needs_backfill = True
-            conn.execute(
-                "UPDATE tab_entries SET entry_pk = rowid WHERE entry_pk IS NULL"
-            )
-            entry_pk_is_primary = any(
-                row["name"] == "entry_pk" and int(row["pk"]) > 0
-                for row in conn.execute("PRAGMA table_info(tab_entries)")
-            )
+            needs_backfill = schema_version < 3
             if "updated_at_us" not in columns:
                 conn.execute(
                     "ALTER TABLE tab_entries "
@@ -688,48 +583,14 @@ class InfoStorage:
                         f"ALTER TABLE tab_feed_state "
                         f"ADD COLUMN {column} {definition}"
                     )
-            if "tab_entry_tags" in tables and not {
-                "entry_pk", "tag"
-            }.issubset(tag_columns):
-                conn.execute("DROP TABLE tab_entry_tags")
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS tab_entry_tags (
-                    entry_pk INTEGER NOT NULL,
-                    tag TEXT NOT NULL,
-                    PRIMARY KEY (entry_pk, tag)
-                ) WITHOUT ROWID
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_entry_tags_tag
-                ON tab_entry_tags(tag, entry_pk)
-                """
-            )
-            conn.execute(
-                """
-                CREATE VIRTUAL TABLE IF NOT EXISTS tab_entries_fts USING fts5(
-                    srce_ty UNINDEXED,
-                    srce_id UNINDEXED,
-                    search_text,
-                    tokenize = 'trigram'
-                )
-                """
-            )
+            conn.execute("DROP TABLE IF EXISTS tab_entry_tags")
+            conn.execute("DROP TABLE IF EXISTS tab_entries_fts")
             for old_index in (
                 "idx_entries_favored",
                 "idx_entries_noticed",
-                "idx_entries_updated",
+                "idx_entries_updated", "idx_entries_pk",
             ):
                 conn.execute(f"DROP INDEX IF EXISTS {old_index}")
-            if entry_pk_is_primary:
-                conn.execute("DROP INDEX IF EXISTS idx_entries_pk")
-            else:
-                conn.execute(
-                    """CREATE UNIQUE INDEX IF NOT EXISTS idx_entries_pk
-                    ON tab_entries(entry_pk)"""
-                )
             conn.execute(
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_entries_identity
@@ -751,24 +612,18 @@ class InfoStorage:
                 """
             )
 
-            if needs_backfill or not auxiliary_data_ready:
-                self._rebuild_entry_indexes()
+            if needs_backfill:
+                cursor = conn.execute(
+                    "SELECT srce_ty, srce_id, updated FROM tab_entries"
+                )
+                while rows := cursor.fetchmany(1000):
+                    conn.executemany(
+                        "UPDATE tab_entries SET updated_at_us = ? "
+                        "WHERE srce_ty = ? AND srce_id = ?",
+                        ((self._updated_at_us(row["updated"]), row["srce_ty"],
+                          row["srce_id"]) for row in rows),
+                    )
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-
-    def _fetch_all(self) -> list[sqlite3.Row]:
-        with self._get_conn() as conn:
-            cur = conn.execute(
-                """
-                SELECT srce_ty, srce_id, version, favored, noticed, state_rev, updated, content
-                FROM tab_entries
-                ORDER BY srce_ty, srce_id
-                """
-            )
-        return cur.fetchall()
 
     def _upsert_row(
         self,
@@ -785,7 +640,7 @@ class InfoStorage:
         conn = self._get_conn()
         existing = conn.execute(
             """
-            SELECT entry_pk, version, updated, content
+            SELECT version, updated, content
             FROM tab_entries
             WHERE srce_ty = ? AND srce_id = ?
             """,
@@ -793,25 +648,19 @@ class InfoStorage:
         ).fetchone()
 
         if existing is None:
-            cur = conn.execute(
+            conn.execute(
                 """
                 INSERT INTO tab_entries (
-                    entry_pk, srce_ty, srce_id, version,
+                    srce_ty, srce_id, version,
                     favored, noticed, state_rev,
                     updated, updated_at_us, content
-                ) VALUES (
-                    (SELECT COALESCE(MAX(entry_pk), 0) + 1 FROM tab_entries),
-                    ?, ?, ?, ?, ?, 0, ?, ?, ?
-                )
-                RETURNING entry_pk
+                ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)
                 """,
                 (
                     srce_ty, srce_id, version, favored, noticed,
                     updated, updated_at_us, content_json,
                 ),
             )
-            entry_pk = int(cur.fetchone()["entry_pk"])
-            self._sync_entry_indexes(entry_pk, srce_ty, srce_id, content)
             return 1
 
         stored_version = int(existing["version"])
@@ -830,18 +679,16 @@ class InfoStorage:
                 UPDATE tab_entries
                 SET version = ?, noticed = 0, state_rev = state_rev + 1,
                     updated = ?, updated_at_us = ?, content = ?
-                WHERE entry_pk = ?
+                WHERE srce_ty = ? AND srce_id = ?
                 """,
                 (
                     version,
                     updated,
                     updated_at_us,
                     self._encode_content(merged_content),
-                    existing["entry_pk"],
+                    srce_ty,
+                    srce_id,
                 ),
-            )
-            self._sync_entry_indexes(
-                existing["entry_pk"], srce_ty, srce_id, merged_content
             )
             return 1
 
@@ -856,109 +703,17 @@ class InfoStorage:
             """
             UPDATE tab_entries
             SET updated = ?, updated_at_us = ?, content = ?
-            WHERE entry_pk = ?
+            WHERE srce_ty = ? AND srce_id = ?
             """,
             (
                 updated,
                 updated_at_us,
                 self._encode_content(merged_content),
-                existing["entry_pk"],
-            ),
-        )
-        self._sync_entry_indexes(
-            existing["entry_pk"], srce_ty, srce_id, merged_content
-        )
-        return 1
-
-    def _rebuild_entry_indexes(self) -> None:
-        conn = self._get_conn()
-        conn.execute("DELETE FROM tab_entry_tags")
-        conn.execute("DELETE FROM tab_entries_fts")
-        last_entry_pk = 0
-        while True:
-            rows = conn.execute(
-                """
-                SELECT entry_pk, srce_ty, srce_id, updated, content
-                FROM tab_entries
-                WHERE entry_pk > ?
-                ORDER BY entry_pk
-                LIMIT 1000
-                """,
-                (last_entry_pk,),
-            ).fetchall()
-            if not rows:
-                break
-            for row in rows:
-                last_entry_pk = int(row["entry_pk"])
-                conn.execute(
-                    "UPDATE tab_entries SET updated_at_us = ? WHERE entry_pk = ?",
-                    (self._updated_at_us(row["updated"]), last_entry_pk),
-                )
-                try:
-                    content = json.loads(row["content"])
-                except (json.JSONDecodeError, TypeError):
-                    content = {}
-                if not isinstance(content, dict):
-                    content = {}
-                self._sync_entry_indexes(
-                    last_entry_pk, row["srce_ty"], row["srce_id"], content
-                )
-
-    def _sync_entry_indexes(
-        self,
-        entry_pk: int,
-        srce_ty: str,
-        srce_id: str,
-        content: dict,
-    ) -> None:
-        conn = self._get_conn()
-        tags = self._clean_tags(content.get("tags", []))
-        conn.execute(
-            "DELETE FROM tab_entry_tags WHERE entry_pk = ?",
-            (entry_pk,),
-        )
-        conn.executemany(
-            """
-            INSERT INTO tab_entry_tags (entry_pk, tag)
-            VALUES (?, ?)
-            """,
-            ((entry_pk, tag) for tag in tags),
-        )
-        conn.execute("DELETE FROM tab_entries_fts WHERE rowid = ?", (entry_pk,))
-        conn.execute(
-            """
-            INSERT INTO tab_entries_fts (rowid, srce_ty, srce_id, search_text)
-            VALUES (?, ?, ?, ?)
-            """,
-            (
-                entry_pk,
                 srce_ty,
                 srce_id,
-                self._entry_search_text(srce_id, content),
             ),
         )
-
-    @staticmethod
-    def _clean_tags(raw_tags: object) -> list[str]:
-        if not isinstance(raw_tags, list):
-            return []
-        return list(dict.fromkeys(
-            tag.strip()
-            for tag in raw_tags
-            if isinstance(tag, str) and tag.strip()
-        ))
-
-    @classmethod
-    def _entry_search_text(cls, srce_id: str, content: dict) -> str:
-        return " ".join(
-            [
-                srce_id,
-                str(content.get("titl", "")),
-                str(content.get("auth", "")),
-                str(content.get("abst", "")),
-                " ".join(cls._clean_tags(content.get("tags", []))),
-            ]
-        ).lower()
+        return 1
 
     @staticmethod
     def _encode_content(content: dict) -> str:
@@ -989,9 +744,9 @@ class InfoStorage:
             placeholders = ",".join("?" for _ in selected_tags)
             options.append(
                 f"""EXISTS (
-                    SELECT 1 FROM tab_entry_tags AS selected_tag
-                    WHERE selected_tag.entry_pk = {alias}.entry_pk
-                      AND selected_tag.tag IN ({placeholders})
+                    SELECT 1 FROM json_each({alias}.content, '$.tags') AS selected_tag
+                    WHERE selected_tag.type = 'text'
+                      AND selected_tag.value IN ({placeholders})
                 )"""
             )
             params.extend(sorted(selected_tags))
@@ -1035,50 +790,21 @@ class InfoStorage:
             params.extend(selector_params)
         clean_query = query_text.strip().lower()
         if clean_query:
-            if len(clean_query) >= 3 and not any(
-                ord(char) < 32 for char in clean_query
-            ):
-                conditions.append(
-                    """e.entry_pk IN (
-                        SELECT rowid FROM tab_entries_fts
-                        WHERE tab_entries_fts MATCH ?
-                    )"""
-                )
-                params.append(f'"{clean_query.replace(chr(34), chr(34) * 2)}"')
-            else:
-                conditions.append(
-                    """e.entry_pk IN (
-                        SELECT rowid FROM tab_entries_fts
-                        WHERE instr(search_text, ?) > 0
-                    )"""
-                )
-                params.append(clean_query)
+            conditions.append(
+                """instr(lower(
+                    e.srce_id || ' ' ||
+                    coalesce(json_extract(e.content, '$.titl'), '') || ' ' ||
+                    coalesce(json_extract(e.content, '$.auth'), '') || ' ' ||
+                    coalesce(json_extract(e.content, '$.abst'), '') || ' ' ||
+                    coalesce((
+                        SELECT group_concat(value, ' ')
+                        FROM json_each(e.content, '$.tags')
+                        WHERE type = 'text'
+                    ), '')
+                ), ?) > 0"""
+            )
+            params.append(clean_query)
         return conditions, params
-
-    def _update_row(
-        self,
-        srce_ty: str,
-        srce_id: str,
-        *,
-        favored: int | None = None,
-        noticed: int | None = None,
-    ) -> int:
-        sets = []
-        pars = []
-        if favored is not None:
-            sets.append("favored = ?")
-            pars.append(favored)
-        if noticed is not None:
-            sets.append("noticed = ?")
-            pars.append(noticed)
-        if not sets:
-            return 0
-        sets.append("state_rev = state_rev + 1")
-        pars.extend([srce_ty, srce_id])
-        sql = f"UPDATE tab_entries SET {', '.join(sets)} WHERE srce_ty = ? AND srce_id = ?"
-        with self._get_conn() as conn:
-            cur = conn.execute(sql, pars)
-        return cur.rowcount
 
     def _update_flag_if_current(
         self,
@@ -1115,21 +841,17 @@ class InfoStorage:
         content: dict,
     ) -> int:
         conn = self._get_conn()
-        try:
+        with conn:
             conn.execute("BEGIN IMMEDIATE")
             cur = conn.execute(
                 """
                 INSERT INTO tab_entries (
-                    entry_pk, srce_ty, srce_id, version,
+                    srce_ty, srce_id, version,
                     favored, noticed, state_rev,
                     updated, updated_at_us, content
                 )
-                VALUES (
-                    (SELECT COALESCE(MAX(entry_pk), 0) + 1 FROM tab_entries),
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?
-                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(srce_ty, srce_id) DO NOTHING
-                RETURNING entry_pk
                 """,
                 (
                     srce_ty, srce_id, version, favored, noticed,
@@ -1137,16 +859,7 @@ class InfoStorage:
                     self._encode_content(content),
                 ),
             )
-            inserted = cur.fetchone()
-            if inserted is not None:
-                self._sync_entry_indexes(
-                    inserted["entry_pk"], srce_ty, srce_id, content
-                )
-            conn.commit()
-            return int(inserted is not None)
-        except Exception:
-            conn.rollback()
-            raise
+            return cur.rowcount
 
     # helper methods
     @staticmethod

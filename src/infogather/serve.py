@@ -53,19 +53,6 @@ def _parse_flag(raw: str) -> bool:
     return raw.strip() == "1"
 
 
-def _parse_tags(values: list[str]) -> list[str]:
-    tags = []
-    seen = set()
-    for value in values:
-        for part in value.split(","):
-            tag = part.strip()
-            if not tag or tag in seen:
-                continue
-            seen.add(tag)
-            tags.append(tag)
-    return tags
-
-
 def _parse_selectors(values: list[str]) -> tuple[set[str], set[str]]:
     tag_values: set[str] = set()
     source_types: set[str] = set()
@@ -84,8 +71,6 @@ def _parse_selectors(values: list[str]) -> tuple[set[str], set[str]]:
                 if srce_ty:
                     source_types.add(srce_ty)
                 continue
-            # Backward compatibility: treat unknown selector as a tag.
-            tag_values.add(selector)
     return tag_values, source_types
 
 
@@ -136,7 +121,6 @@ def _entry_query_options(query: dict[str, list[str]]) -> dict:
     selected_tags, selected_source_types = _parse_selectors(
         query.get("selectors", [])
     )
-    selected_tags.update(_parse_tags(query.get("tags", [])))
     now = datetime.now(timezone.utc)
     window = None
     if updated_within_day:
@@ -428,8 +412,6 @@ class InfoHandler(SimpleHTTPRequestHandler):
         query = parse_qs(raw_query)
         limit = _parse_int(query.get("limit", ["30"])[
                            0], 30, min_value=1, max_value=200)
-        offset = _parse_int(query.get("offset", ["0"])[
-                            0], 0, min_value=0, max_value=2_147_483_647)
         try:
             cursor = _decode_cursor(query.get("cursor", [""])[0])
         except ValueError as exc:
@@ -446,7 +428,6 @@ class InfoHandler(SimpleHTTPRequestHandler):
                 result = storage.query_entries(
                     **options,
                     limit=limit,
-                    offset=offset,
                     cursor=cursor,
                     include_total=cursor is None and include_total,
                 )
@@ -462,7 +443,6 @@ class InfoHandler(SimpleHTTPRequestHandler):
                 "items": result["items"],
                 "total": result["total"],
                 "limit": limit,
-                "offset": offset,
                 "has_more": result["has_more"],
                 "next_cursor": _encode_cursor(result["next_position"]),
             }

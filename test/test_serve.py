@@ -186,7 +186,7 @@ class ServeMutationEndpointTests(unittest.TestCase):
             self.assertEqual(response["favored"], 1)
 
             with InfoStorage(str(db_path)) as storage:
-                entries = storage.export_entries_json()
+                entries = storage.query_entries()["items"]
             self.assertEqual(entries[0]["favored"], 1)
 
     def test_entries_endpoint_filters_and_returns_cursor_metadata(self) -> None:
@@ -282,7 +282,7 @@ class ServeMutationEndpointTests(unittest.TestCase):
             db_path = Path(td) / "entries.db"
             _seed_entry(db_path)
             with InfoStorage(db_path) as storage:
-                newer = storage.export_entries_json()[0]
+                newer = storage.query_entries()["items"][0]
                 storage.update_feed_states(
                     {"https://example.com/feed": {"next_fetch_at": 999}}
                 )
@@ -311,7 +311,7 @@ class ServeMutationEndpointTests(unittest.TestCase):
 
             self.assertEqual(harness.status, HTTPStatus.OK)
             with InfoStorage(db_path) as storage:
-                restored = storage.export_entries_json()[0]
+                restored = storage.query_entries()["items"][0]
             self.assertEqual(restored["version"], 2)
             self.assertEqual(restored["content"]["titl"], "Newer title")
 

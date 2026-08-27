@@ -36,6 +36,10 @@ def _entry(
     }
 
 
+def _items(storage: InfoStorage) -> list[dict]:
+    return storage.query_entries(limit=1000)["items"]
+
+
 class InfoStorageTests(unittest.TestCase):
     def test_initialization_creates_database_parent(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -58,7 +62,7 @@ class InfoStorageTests(unittest.TestCase):
                 pass
 
             with InfoStorage(f"{db_path.as_uri()}?mode=ro") as storage:
-                self.assertEqual(storage.export_entries_json(), [])
+                self.assertEqual(_items(storage), [])
 
     def test_pre_feed_cache_schema_requires_writable_migration(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -156,7 +160,7 @@ class InfoStorageTests(unittest.TestCase):
                 )
 
             with InfoStorage(str(db_path)) as storage:
-                entries = storage.export_entries_json()
+                entries = _items(storage)
                 search = storage.query_entries(query_text="title")
                 facets = storage.query_facets(
                     configured_tags={"math.AG"},
@@ -186,11 +190,11 @@ class InfoStorageTests(unittest.TestCase):
                 with redirect_stdout(io.StringIO()):
                     storage.insert_entries([_entry(version=2, title="version 2")])
                 storage.favor_entry("arXiv", "2601.00001", 1)
-                storage.notice_entry("arXiv", "2601.00001", 1)
+                storage.notice_entry_if_current("arXiv", "2601.00001", 0, 1, 1)
 
                 with redirect_stdout(io.StringIO()):
                     storage.insert_entries([_entry(version=1, title="stale")])
-                stored = storage.export_entries_json()[0]
+                stored = _items(storage)[0]
                 self.assertEqual(stored["version"], 2)
                 self.assertEqual(stored["content"]["titl"], "version 2")
                 self.assertEqual(stored["favored"], 1)
@@ -198,7 +202,7 @@ class InfoStorageTests(unittest.TestCase):
 
                 with redirect_stdout(io.StringIO()):
                     storage.insert_entries([_entry(version=3, title="version 3")])
-                stored = storage.export_entries_json()[0]
+                stored = _items(storage)[0]
                 self.assertEqual(stored["version"], 3)
                 self.assertEqual(stored["content"]["titl"], "version 3")
                 self.assertEqual(stored["favored"], 1)
@@ -212,7 +216,7 @@ class InfoStorageTests(unittest.TestCase):
             with InfoStorage(db_path) as storage:
                 with self.assertRaises(TypeError), redirect_stdout(io.StringIO()):
                     storage.insert_entries([valid, invalid])
-                self.assertEqual(storage.export_entries_json(), [])
+                self.assertEqual(_items(storage), [])
 
     def test_equal_version_merges_tags_across_batches(self) -> None:
         first = _entry(version=1)
@@ -223,7 +227,7 @@ class InfoStorageTests(unittest.TestCase):
                 storage.insert_entries([first])
                 storage.insert_entries([second])
 
-            stored = storage.export_entries_json()[0]
+            stored = _items(storage)[0]
 
         self.assertEqual(stored["content"]["tags"], ["math.AG", "math.NT"])
 
@@ -239,7 +243,7 @@ class InfoStorageTests(unittest.TestCase):
             with redirect_stdout(io.StringIO()) as out:
                 storage.insert_entries([first])
                 storage.insert_entries([corrected])
-            stored = storage.export_entries_json()[0]
+            stored = _items(storage)[0]
             self.assertIn("1/1 inserted or updated", out.getvalue())
 
         self.assertEqual(stored["version"], 1)
@@ -289,7 +293,7 @@ class InfoStorageTests(unittest.TestCase):
             ["2601.00004", "2601.00002"],
         )
 
-    def test_auxiliary_indexes_follow_update_remove_and_restore(self) -> None:
+    def test_queries_follow_update_remove_and_restore(self) -> None:
         first = _entry(version=1, title="Old searchable title")
         corrected = _entry(
             version=1,
@@ -318,27 +322,6 @@ class InfoStorageTests(unittest.TestCase):
         self.assertEqual(facets["tag_counts"], {"math.AG": 1, "math.NT": 1})
         self.assertEqual(restored["total"], 1)
 
-    def test_auxiliary_indexes_survive_vacuum(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            db_path = Path(td) / "entries.db"
-            with InfoStorage(db_path) as storage:
-                with redirect_stdout(io.StringIO()):
-                    storage.insert_entries([_entry(version=1)])
-            with sqlite3.connect(db_path) as conn:
-                conn.execute("VACUUM")
-            with InfoStorage(db_path) as storage:
-                search = storage.query_entries(query_text="abstract")
-                facets = storage.query_facets(
-                    configured_tags={"math.AG"},
-                    configured_source_types=set(),
-                    groups=[({"math.AG"}, set())],
-                    selected_tags=set(),
-                    selected_source_types=set(),
-                )
-
-        self.assertEqual(search["total"], 1)
-        self.assertEqual(facets["tag_counts"], {"math.AG": 1})
-
     def test_short_search_does_not_match_json_field_names(self) -> None:
         with InfoStorage(":memory:") as storage:
             with redirect_stdout(io.StringIO()):
@@ -346,24 +329,6 @@ class InfoStorageTests(unittest.TestCase):
 
             self.assertEqual(storage.query_entries(query_text="ta")["total"], 0)
             self.assertEqual(storage.query_entries(query_text="au")["total"], 1)
-
-    def test_initialization_repairs_missing_tag_index(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            db_path = Path(td) / "entries.db"
-            with InfoStorage(db_path):
-                pass
-            with sqlite3.connect(db_path) as conn:
-                conn.execute("DROP INDEX idx_entry_tags_tag")
-
-            with InfoStorage(db_path):
-                pass
-            with sqlite3.connect(db_path) as conn:
-                indexes = {
-                    row[1]
-                    for row in conn.execute("PRAGMA index_list(tab_entry_tags)")
-                }
-
-        self.assertIn("idx_entry_tags_tag", indexes)
 
     def test_read_only_legacy_schema_raises_clear_error(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -418,19 +383,8 @@ class InfoStorageTests(unittest.TestCase):
                     {"https://example.com/feed": {"etag": "new"}},
                 )
 
-            self.assertEqual(storage.export_entries_json(), [])
+            self.assertEqual(_items(storage), [])
             self.assertEqual(storage.get_feed_states(), {})
-
-    def test_feed_states_can_be_limited_to_configured_urls(self) -> None:
-        with InfoStorage(":memory:") as storage:
-            storage.update_feed_states({
-                "https://example.com/active": {"etag": "active"},
-                "https://example.com/retired": {"etag": "retired"},
-            })
-
-            states = storage.get_feed_states({"https://example.com/active"})
-
-        self.assertEqual(set(states), {"https://example.com/active"})
 
     def test_restore_entry_restores_removed_state_without_downgrade(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -444,13 +398,13 @@ class InfoStorageTests(unittest.TestCase):
                 expected_restored = {**removed, "state_rev": 1}
                 self.assertEqual(popped, expected_restored)
                 self.assertEqual(storage.restore_entry(popped), 1)
-                restored = storage.export_entries_json()[0]
+                restored = _items(storage)[0]
                 self.assertEqual(restored, expected_restored)
 
                 with redirect_stdout(io.StringIO()):
                     storage.insert_entries([_entry(version=3, title="newer")])
                 self.assertEqual(storage.restore_entry(removed), 0)
-                restored = storage.export_entries_json()[0]
+                restored = _items(storage)[0]
                 self.assertEqual(restored["version"], 3)
                 self.assertEqual(restored["content"]["titl"], "newer")
                 self.assertEqual(restored["favored"], 1)
@@ -477,7 +431,7 @@ class InfoStorageTests(unittest.TestCase):
                     ),
                     0,
                 )
-                restored = storage.export_entries_json()[0]
+                restored = _items(storage)[0]
                 self.assertEqual(restored["favored"], 1)
                 self.assertEqual(restored["state_rev"], 2)
 
