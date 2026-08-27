@@ -608,7 +608,6 @@ class InfoHandler(SimpleHTTPRequestHandler):
                 "srce_ty": srce_ty,
                 "srce_id": srce_id,
                 "undo_token": undo_token,
-                "entry": entry,
             }
         )
 

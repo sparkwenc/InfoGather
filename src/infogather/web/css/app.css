@@ -28,9 +28,7 @@
   --danger-soft: #fdeeed;
   --focus: #3b6fd4;
   --on-accent: #ffffff;
-  --track-bg: rgb(23 32 44 / 0.09);
   --grad-brand: linear-gradient(135deg, #3e6fd0 0%, #244d96 100%);
-  --grad-progress: linear-gradient(90deg, #4f82d9, #244d96);
   --shadow-sm: 0 1px 2px rgb(23 32 44 / 0.04), 0 2px 6px rgb(23 32 44 / 0.05);
   --shadow-md: 0 4px 14px rgb(23 32 44 / 0.06), 0 14px 40px rgb(23 32 44 / 0.09);
   --shadow-lg: 0 10px 24px rgb(23 32 44 / 0.08), 0 28px 70px rgb(23 32 44 / 0.12);
@@ -72,9 +70,7 @@
     --danger-soft: #331e1c;
     --focus: #87a9e8;
     --on-accent: #10151d;
-    --track-bg: rgb(255 255 255 / 0.12);
     --grad-brand: linear-gradient(135deg, #6d95e0 0%, #3c5c9e 100%);
-    --grad-progress: linear-gradient(90deg, #5f88d4, #8db0ea);
     --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.35);
     --shadow-md: 0 6px 18px rgb(0 0 0 / 0.4);
     --shadow-lg: 0 14px 34px rgb(0 0 0 / 0.5);
@@ -309,10 +305,6 @@ input {
   background: var(--surface-muted);
 }
 
-.ins-panel[hidden] {
-  display: none;
-}
-
 .ins-row {
   display: flex;
   align-items: center;
@@ -329,41 +321,18 @@ input {
   color: var(--ink);
 }
 
-.ins-track {
+.ins-progress {
   width: 100%;
   height: 6px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: var(--track-bg);
+  accent-color: var(--accent);
 }
 
-.ins-bar {
-  width: 0;
-  height: 100%;
-  border-radius: inherit;
-  background: var(--grad-progress);
-  transition: width 0.28s ease;
+.ins-panel[data-state="succeeded"] .ins-progress {
+  accent-color: var(--success);
 }
 
-.ins-panel[data-state="succeeded"] .ins-bar {
-  background: var(--success);
-}
-
-.ins-panel[data-state="failed"] .ins-bar {
-  background: var(--danger);
-}
-
-.ins-log {
-  max-height: 36px;
-  margin-top: 7px;
-  overflow: auto;
-  color: var(--faint);
-  font-family: var(--font-mono);
-  font-size: 9px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
-  scrollbar-width: thin;
+.ins-panel[data-state="failed"] .ins-progress {
+  accent-color: var(--danger);
 }
 
 /* ---------- source tree ---------- */
@@ -411,9 +380,7 @@ input {
 }
 
 .tree-group-title {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  display: list-item;
   min-height: 40px;
   margin-top: 5px;
   padding: 5px 6px 5px 12px;
@@ -423,6 +390,7 @@ input {
   background: var(--surface-muted);
   font-size: 12px;
   font-weight: 700;
+  cursor: pointer;
   transition: background 0.15s ease;
 }
 
@@ -435,29 +403,6 @@ input {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.tree-group-toggle {
-  display: grid;
-  flex: 0 0 28px;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  place-items: center;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  color: var(--muted);
-  background: var(--surface);
-  font-size: 14px;
-  line-height: 1;
-  cursor: pointer;
-  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
-}
-
-.tree-group-toggle:hover {
-  border-color: var(--line-strong);
-  color: var(--accent);
-  background: var(--accent-softer);
 }
 
 .tree-children .tree-item label {

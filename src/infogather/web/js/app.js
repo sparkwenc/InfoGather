@@ -1,21 +1,44 @@
+import * as api from "./api.js";
+import * as ui from "./ui.js";
+
 const pageSize = 24;
 
-const api = window.InfoAPI;
-const ui = window.InfoUI;
-const state = window.InfoState.createState();
+const state = {
+  offset: 0,
+  total: null,
+  cursor: null,
+  hasMore: false,
+  appliedQuery: "",
+  loading: false,
+  pendingReset: false,
+  entriesGeneration: 0,
+  treeGeneration: 0,
+  selectedSelectors: new Set(),
+  favoredOnly: false,
+  unnoticedOnly: false,
+  updatedWithinDay: false,
+  updatedWithinWeek: false,
+  versionIs1: false,
+  versionIsNot1: false,
+  treeGroups: [],
+  lastUndo: null,
+  mutating: false,
+  insPollTimer: null,
+  insStatusLoading: false,
+  insWasRunning: false
+};
 
 const metaEl = document.getElementById("meta");
 const listEl = document.getElementById("list");
 const moreEl = document.getElementById("more");
 const qEl = document.getElementById("q");
-const searchEl = document.getElementById("search");
+const searchForm = document.getElementById("search-form");
 const undoBtn = document.getElementById("undo-btn");
 const insBtn = document.getElementById("ins-btn");
 const insPanel = document.getElementById("ins-panel");
 const insText = document.getElementById("ins-text");
 const insPercent = document.getElementById("ins-percent");
-const insBar = document.getElementById("ins-bar");
-const insLog = document.getElementById("ins-log");
+const insProgress = document.getElementById("ins-progress");
 
 const treeRootEl = document.getElementById("tree-root");
 const treeListEl = document.getElementById("tree-list");
@@ -29,9 +52,7 @@ const versionBtn = document.getElementById("version-btn");
 const versionNotBtn = document.getElementById("version-not-btn");
 const resultsHeading = document.getElementById("results-heading");
 
-function insElements() {
-  return { insPanel, insBtn, insText, insPercent, insBar, insLog };
-}
+const insElements = { insPanel, insBtn, insText, insPercent, insProgress };
 
 function renderUndo() {
   undoBtn.textContent = state.lastUndo?.label || "撤销上一步";
@@ -58,40 +79,6 @@ function endMutation() {
   renderUndo();
 }
 
-function scheduleMutationRefresh({ entries = false } = {}) {
-  if (state.mutationRefreshTimer) {
-    clearTimeout(state.mutationRefreshTimer);
-  }
-  // An in-flight reset renders pre-mutation data and must be re-run; an
-  // in-flight append only adds untouched items, so let it finish and
-  // refresh the tree instead of resetting the list to page 1.
-  state.mutationRefreshNeedsEntries ||= entries
-    || (state.loading && !state.loadingAppend);
-  state.treeGeneration += 1;
-  if (state.mutationRefreshNeedsEntries) {
-    state.entriesGeneration += 1;
-  }
-  const entriesGeneration = state.entriesGeneration;
-  const treeGeneration = state.treeGeneration;
-  state.mutationRefreshTimer = setTimeout(() => {
-    state.mutationRefreshTimer = null;
-    if (
-      treeGeneration !== state.treeGeneration
-      || (
-        state.mutationRefreshNeedsEntries
-        && entriesGeneration !== state.entriesGeneration
-      )
-    ) {
-      state.mutationRefreshNeedsEntries = false;
-      return;
-    }
-    const refreshEntries = state.mutationRefreshNeedsEntries;
-    state.mutationRefreshNeedsEntries = false;
-    if (refreshEntries) void refreshFilteredView();
-    else void loadTagTree();
-  }, 80);
-}
-
 function findRenderedEntry(item) {
   return Array.from(listEl.querySelectorAll(".card")).find((card) => (
     card.dataset.sourceType === String(item.srce_ty || "")
@@ -99,113 +86,19 @@ function findRenderedEntry(item) {
   )) || null;
 }
 
-function removeRenderedCard(card, item = null) {
-  if (!card?.isConnected && item) card = findRenderedEntry(item);
-  if (!card?.isConnected) return;
-  card.remove();
-  state.offset = Math.max(0, state.offset - 1);
-  if (Number.isFinite(state.total)) {
-    state.total = Math.max(0, state.total - 1);
-  }
-  if (!state.hasMore && !listEl.querySelector(".card")) {
-    const empty = document.createElement("p");
-    empty.className = "empty";
-    empty.textContent = "没有匹配的条目。";
-    listEl.replaceChildren(empty);
-  }
-  ui.setMeta(metaEl, state);
-  ui.setMoreVisible(moreEl, state);
-}
-
-function entryMatchesMutableFilters(item) {
-  return (
-    (!state.renderedFavoredOnly || Number(item.favored || 0) === 1)
-    && (!state.renderedUnnoticedOnly || Number(item.noticed || 0) === 0)
-  );
-}
-
-function updateRenderedEntry(item, card = findRenderedEntry(item)) {
-  if (!card?.isConnected) card = findRenderedEntry(item);
-  if (!card?.isConnected) return;
-  // Rebind handlers to the freshest item so later toggles use its current
-  // favored/noticed/state_rev (critical after undo patched a stale object).
-  card._liveItem = item;
-  if (!entryMatchesMutableFilters(item)) {
-    removeRenderedCard(card, item);
-    return;
-  }
-  const title = card.querySelector(".title")?.textContent || "该条目";
-  const favored = Number(item.favored || 0) === 1;
-  const favoredBtn = card.querySelector('[data-action="favored"]');
-  if (favoredBtn) {
-    favoredBtn.classList.toggle("on", favored);
-    favoredBtn.dataset.favored = favored ? "1" : "0";
-    const favLabel = favoredBtn.querySelector("span");
-    if (favLabel) favLabel.textContent = favored ? "已收藏" : "收藏";
-    favoredBtn.setAttribute("aria-pressed", String(favored));
-    favoredBtn.setAttribute(
-      "aria-label",
-      favored ? `取消收藏《${title}》` : `收藏《${title}》`
-    );
-  }
-  const noticed = Number(item.noticed || 0) === 1;
-  const noticedBtn = card.querySelector('[data-action="noticed"]');
-  if (noticedBtn) {
-    noticedBtn.classList.toggle("on", noticed);
-    noticedBtn.dataset.noticed = noticed ? "1" : "0";
-    const noticeLabel = noticedBtn.querySelector("span");
-    if (noticeLabel) noticeLabel.textContent = noticed ? "已读" : "未读";
-    noticedBtn.setAttribute("aria-pressed", String(noticed));
-    noticedBtn.setAttribute(
-      "aria-label",
-      noticed ? `标记《${title}》为未读` : `标记《${title}》为已读`
-    );
-  }
-}
-
-function prependRenderedEntry(item) {
-  const existing = findRenderedEntry(item);
-  if (existing) {
-    updateRenderedEntry(item, existing);
-    return;
-  }
-  const empty = listEl.querySelector(".empty");
-  if (empty) empty.remove();
-  listEl.prepend(makeEntryCard(item));
-  state.offset += 1;
-  if (Number.isFinite(state.total)) state.total += 1;
-  ui.setMeta(metaEl, state);
-  ui.setMoreVisible(moreEl, state);
-}
-
 function stopInsPolling() {
-  if (state.insPollTimer) {
-    clearInterval(state.insPollTimer);
-    state.insPollTimer = null;
-  }
+  clearInterval(state.insPollTimer);
+  state.insPollTimer = null;
 }
 
 function startInsPolling() {
   if (state.insPollTimer) return;
-  state.insPollTimer = setInterval(() => {
-    void pollInsStatus();
-  }, 900);
+  state.insPollTimer = setInterval(pollInsStatus, 900);
 }
 
 function renderTree() {
   clearTagsEl.disabled = state.selectedSelectors.size === 0;
   ui.renderTree(treeListEl, state, {
-    onToggleGroup(groupKey) {
-      if (state.collapsedGroups.has(groupKey)) {
-        state.collapsedGroups.delete(groupKey);
-      } else {
-        state.collapsedGroups.add(groupKey);
-      }
-      renderTree();
-      Array.from(treeListEl.querySelectorAll(".tree-group-toggle"))
-        .find((button) => button.dataset.groupKey === groupKey)
-        ?.focus();
-    },
     onSelectorChange(selector, checked) {
       if (checked) {
         state.selectedSelectors.add(selector);
@@ -242,12 +135,6 @@ async function refreshFilteredView() {
   ]);
 }
 
-function makeEntryCard(item) {
-  const card = ui.makeCard(item);
-  ui.renderMath(card);
-  return card;
-}
-
 function renderEntries(items, { reset }) {
   if (reset) {
     const activeElement = document.activeElement;
@@ -261,18 +148,16 @@ function renderEntries(items, { reset }) {
           action: activeElement.dataset.action
         }
       : null;
-    const fragment = document.createDocumentFragment();
+    const nodes = [];
     if (!items.length) {
       const p = document.createElement("p");
       p.className = "empty";
       p.textContent = "没有匹配的条目。";
-      fragment.appendChild(p);
+      nodes.push(p);
     } else {
-      items.forEach((item) => {
-        fragment.appendChild(makeEntryCard(item));
-      });
+      nodes.push(...items.map(ui.makeCard));
     }
-    listEl.replaceChildren(fragment);
+    listEl.replaceChildren(...nodes);
     if (focusTarget) {
       const card = findRenderedEntry({
         srce_ty: focusTarget.srceTy,
@@ -283,12 +168,8 @@ function renderEntries(items, { reset }) {
     return;
   }
 
-  const fragment = document.createDocumentFragment();
   listEl.querySelector(".empty")?.remove();
-  items.forEach((item) => {
-    fragment.appendChild(makeEntryCard(item));
-  });
-  listEl.appendChild(fragment);
+  listEl.append(...items.map(ui.makeCard));
 }
 
 async function pollInsStatus() {
@@ -301,7 +182,7 @@ async function pollInsStatus() {
 
     const wasRunning = state.insWasRunning;
     state.insWasRunning = job.state === "running";
-    ui.renderInsJob(insElements(), job);
+    ui.renderInsJob(insElements, job);
 
     if (job.state === "running") {
       startInsPolling();
@@ -324,9 +205,9 @@ async function pollInsStatus() {
 async function runIns() {
   insBtn.disabled = true;
   try {
-    const { payload } = await api.runIns();
+    const payload = await api.runIns();
     const job = payload.job || {};
-    ui.renderInsJob(insElements(), job);
+    ui.renderInsJob(insElements, job);
     state.insWasRunning = true;
     startInsPolling();
     await pollInsStatus();
@@ -337,79 +218,37 @@ async function runIns() {
   }
 }
 
-async function updateFavored(item, favored, btnEl) {
+async function updateFlag(item, field, value, btnEl) {
   if (!beginMutation()) return;
-  const previous = Number(item.favored || 0);
+  const previous = Number(item[field] || 0);
   const previousRevision = Number(item.state_rev || 0);
-  const filterSignature = state.renderedFilterSignature;
-  const card = btnEl.closest(".card");
   const restoreFocus = btnEl.matches(":focus-visible");
-  let focusUndo = false;
+  const update = field === "favored" ? api.setFavored : api.setNoticed;
   try {
-    const response = await api.setFavored(
-      item.srce_ty, item.srce_id, favored, previous, previousRevision
+    const response = await update(
+      item.srce_ty, item.srce_id, value, previous, previousRevision
     );
-    item.favored = favored;
-    item.state_rev = response.state_rev;
-    updateRenderedEntry(item, card);
     setLastUndo({
-      type: "favored",
+      type: field,
       srceTy: item.srce_ty,
       srceId: item.srce_id,
-      previous: previous,
-      current: favored,
-      currentRevision: previousRevision + 1,
-      item: item,
-      filterSignature: filterSignature,
-      label: favored === 1 ? "撤销收藏" : "撤销取消收藏"
+      previous,
+      current: value,
+      currentRevision: response.state_rev,
+      label: field === "favored"
+        ? (value === 1 ? "撤销收藏" : "撤销取消收藏")
+        : (value === 1 ? "撤销标为已读" : "撤销标为未读")
     });
-    focusUndo = restoreFocus && !findRenderedEntry(item);
-    scheduleMutationRefresh();
+    await refreshFilteredView();
   } catch (err) {
     console.error(err);
-    window.alert("收藏更新失败，请稍后重试。");
-    scheduleMutationRefresh({ entries: true });
+    window.alert(field === "favored"
+      ? "收藏更新失败，请稍后重试。"
+      : "已读状态更新失败，请稍后重试。");
+    await refreshFilteredView();
   } finally {
     endMutation();
-    if (focusUndo) undoBtn.focus();
-  }
-}
-
-async function updateNoticed(item, noticed, btnEl) {
-  if (!beginMutation()) return;
-  const previous = Number(item.noticed || 0);
-  const previousRevision = Number(item.state_rev || 0);
-  const filterSignature = state.renderedFilterSignature;
-  const card = btnEl.closest(".card");
-  const restoreFocus = btnEl.matches(":focus-visible");
-  let focusUndo = false;
-  try {
-    const response = await api.setNoticed(
-      item.srce_ty, item.srce_id, noticed, previous, previousRevision
-    );
-    item.noticed = noticed;
-    item.state_rev = response.state_rev;
-    updateRenderedEntry(item, card);
-    setLastUndo({
-      type: "noticed",
-      srceTy: item.srce_ty,
-      srceId: item.srce_id,
-      previous: previous,
-      current: noticed,
-      currentRevision: previousRevision + 1,
-      item: item,
-      filterSignature: filterSignature,
-      label: noticed === 1 ? "撤销标为已读" : "撤销标为未读"
-    });
-    focusUndo = restoreFocus && !findRenderedEntry(item);
-    scheduleMutationRefresh();
-  } catch (err) {
-    console.error(err);
-    window.alert("已读状态更新失败，请稍后重试。");
-    scheduleMutationRefresh({ entries: true });
-  } finally {
-    endMutation();
-    if (focusUndo) undoBtn.focus();
+    if (restoreFocus) resultsHeading.focus();
   }
 }
 
@@ -421,36 +260,22 @@ async function removeEntry(item, btnEl) {
   if (!ok) return;
 
   if (!beginMutation()) return;
-  const card = btnEl.closest(".card");
   const restoreFocus = btnEl.matches(":focus-visible");
-  let focusUndo = false;
-  const filterSignature = state.renderedFilterSignature;
   try {
     const response = await api.removeEntry(item.srce_ty, item.srce_id);
-    removeRenderedCard(card, item);
-    const responseEntry = response.entry;
-    const canRestoreOptimistically = (
-      responseEntry
-      && responseEntry.srce_ty === item.srce_ty
-      && responseEntry.srce_id === item.srce_id
-      && Number(responseEntry.state_rev) === Number(item.state_rev || 0) + 1
-    );
     setLastUndo({
       type: "remove",
       undoToken: response.undo_token,
-      entry: canRestoreOptimistically ? responseEntry : null,
-      filterSignature: filterSignature,
       label: "撤销移除"
     });
-    focusUndo = restoreFocus;
-    scheduleMutationRefresh();
+    await refreshFilteredView();
   } catch (err) {
     console.error(err);
     window.alert("移除失败，请稍后重试。");
-    scheduleMutationRefresh({ entries: true });
+    await refreshFilteredView();
   } finally {
     endMutation();
-    if (focusUndo) undoBtn.focus();
+    if (restoreFocus) resultsHeading.focus();
   }
 }
 
@@ -462,7 +287,6 @@ async function undoLastAction() {
   state.lastUndo = null;
   renderUndo();
   let succeeded = false;
-  let needsEntriesRefresh = false;
   try {
     if (action.type === "favored") {
       await api.setFavored(
@@ -484,32 +308,9 @@ async function undoLastAction() {
       const response = await api.restoreEntry(action.undoToken);
       if (response.already_present) {
         window.alert("条目已存在于列表中，无需恢复。");
-        needsEntriesRefresh = true;
-      } else if (
-        action.entry
-        && state.renderedViewValid
-        && action.filterSignature === state.renderedFilterSignature
-      ) {
-        prependRenderedEntry(action.entry);
-      } else {
-        needsEntriesRefresh = true;
       }
     }
-    if (action.item) {
-      action.item[action.type] = action.previous;
-      action.item.state_rev = action.currentRevision + 1;
-      const card = findRenderedEntry(action.item);
-      if (card) {
-        updateRenderedEntry(action.item, card);
-      } else if (
-        state.renderedViewValid
-        && action.filterSignature === state.renderedFilterSignature
-        && entryMatchesMutableFilters(action.item)
-      ) {
-        prependRenderedEntry(action.item);
-      }
-    }
-    scheduleMutationRefresh({ entries: needsEntriesRefresh });
+    await refreshFilteredView();
     succeeded = true;
   } catch (err) {
     if (![404, 409].includes(err.status) && !state.lastUndo) {
@@ -521,7 +322,7 @@ async function undoLastAction() {
         ? "该操作已无法撤销。"
         : "撤销失败，请稍后重试。"
     );
-    scheduleMutationRefresh({ entries: true });
+    await refreshFilteredView();
   } finally {
     endMutation();
     if (restoreFocus) {
@@ -535,15 +336,13 @@ async function loadTagTree() {
   const generation = ++state.treeGeneration;
   try {
     const params = buildFilterParams();
-    const filterSignature = params.toString();
     const payload = await api.getTagTree(params);
     if (generation !== state.treeGeneration) return;
     const root = payload.root || { name: "配置源", group_count: 0, source_count: 0, count: 0 };
     treeRootEl.textContent = `${root.name}（${root.group_count} 类 / ${root.source_count} 源 / ${root.count} 条）`;
     state.total = Number(root.count || 0);
-    state.totalFilterSignature = filterSignature;
     ui.setMeta(metaEl, state);
-    ui.setMoreVisible(moreEl, state);
+    moreEl.hidden = !state.hasMore;
     state.treeGroups = Array.isArray(payload.groups) ? payload.groups : [];
     renderTree();
   } catch (err) {
@@ -564,10 +363,8 @@ async function fetchEntries({ reset = false } = {}) {
   state.loading = true;
   listEl.setAttribute("aria-busy", "true");
   moreEl.disabled = true;
-  state.loadingAppend = !reset;
 
   const params = buildFilterParams();
-  const filterSignature = params.toString();
   params.set("limit", String(pageSize));
   params.set("include_total", "0");
   if (!reset && state.cursor) params.set("cursor", state.cursor);
@@ -576,24 +373,12 @@ async function fetchEntries({ reset = false } = {}) {
     const payload = await api.getEntries(params);
     if (generation !== state.entriesGeneration) return;
     const items = Array.isArray(payload.items) ? payload.items : [];
-    const nextTotal = payload.total == null ? null : Number(payload.total);
 
     renderEntries(items, { reset });
     if (reset) {
       state.offset = items.length;
-      if (Number.isFinite(nextTotal)) {
-        state.total = nextTotal;
-        state.totalFilterSignature = filterSignature;
-      } else if (state.totalFilterSignature !== filterSignature) {
-        state.total = null;
-      }
-      state.renderedFilterSignature = filterSignature;
-      state.renderedFavoredOnly = params.get("favored") === "1";
-      state.renderedUnnoticedOnly = params.get("unnoticed") === "1";
-      state.renderedViewValid = true;
     } else {
       state.offset += items.length;
-      if (Number.isFinite(nextTotal)) state.total = nextTotal;
     }
     state.cursor = typeof payload.next_cursor === "string"
       ? payload.next_cursor
@@ -606,15 +391,13 @@ async function fetchEntries({ reset = false } = {}) {
       state.total = null;
       state.cursor = null;
       state.hasMore = false;
-      if (reset) state.renderedViewValid = false;
       listEl.innerHTML = '<p class="empty">读取失败，请确认本地服务已启动。</p>';
     }
     console.error(err);
   } finally {
     ui.setMeta(metaEl, state);
-    ui.setMoreVisible(moreEl, state);
+    moreEl.hidden = !state.hasMore;
     state.loading = false;
-    state.loadingAppend = false;
     if (!state.mutating) listEl.removeAttribute("aria-busy");
     moreEl.disabled = false;
     if (state.pendingReset) {
@@ -633,10 +416,10 @@ listEl.addEventListener("click", (event) => {
   if (!button || !item) return;
   if (button.dataset.action === "favored") {
     const current = Number(button.dataset.favored || 0);
-    void updateFavored(item, current === 1 ? 0 : 1, button);
+    void updateFlag(item, "favored", current === 1 ? 0 : 1, button);
   } else if (button.dataset.action === "noticed") {
     const current = Number(button.dataset.noticed || 0);
-    void updateNoticed(item, current === 1 ? 0 : 1, button);
+    void updateFlag(item, "noticed", current === 1 ? 0 : 1, button);
   } else if (button.dataset.action === "remove") {
     void removeEntry(item, button);
   }
@@ -648,13 +431,11 @@ favoredBtn.addEventListener("click", () => {
   void refreshFilteredView();
 });
 
-if (unnoticedBtn) {
-  unnoticedBtn.addEventListener("click", () => {
-    state.unnoticedOnly = !state.unnoticedOnly;
-    ui.setToggle(unnoticedBtn, state.unnoticedOnly);
-    void refreshFilteredView();
-  });
-}
+unnoticedBtn.addEventListener("click", () => {
+  state.unnoticedOnly = !state.unnoticedOnly;
+  ui.setToggle(unnoticedBtn, state.unnoticedOnly);
+  void refreshFilteredView();
+});
 
 dayBtn.addEventListener("click", () => {
   const next = !state.updatedWithinDay;
@@ -707,32 +488,14 @@ clearTagsEl.addEventListener("click", () => {
   void refreshFilteredView();
 });
 
-searchEl.addEventListener("click", () => {
+searchForm.addEventListener("submit", (event) => {
+  event.preventDefault();
   state.appliedQuery = qEl.value.trim();
   void refreshFilteredView();
-});
-
-qEl.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") {
-    state.appliedQuery = qEl.value.trim();
-    void refreshFilteredView();
-  }
 });
 
 moreEl.addEventListener("click", () => {
   void fetchEntries({ reset: false });
 });
 
-async function bootstrap() {
-  renderUndo();
-  ui.setToggle(favoredBtn, false);
-  if (unnoticedBtn) ui.setToggle(unnoticedBtn, false);
-  ui.setToggle(dayBtn, false);
-  ui.setToggle(weekBtn, false);
-  ui.setToggle(versionBtn, false);
-  ui.setToggle(versionNotBtn, false);
-  await pollInsStatus();
-  await refreshFilteredView();
-}
-
-void bootstrap();
+void pollInsStatus().then(refreshFilteredView);

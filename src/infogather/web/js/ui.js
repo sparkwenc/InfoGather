@@ -1,5 +1,4 @@
-(function (global) {
-  let cardSequence = 0;
+let cardSequence = 0;
   const dateFormatter = new Intl.DateTimeFormat("zh-CN", {
     dateStyle: "medium",
     timeStyle: "short"
@@ -44,18 +43,14 @@
     }
   }
 
-  function setMoreVisible(moreEl, state) {
-    moreEl.hidden = !state.hasMore;
-  }
-
   function renderInsJob(elements, job) {
-    const { insPanel, insBtn, insPercent, insBar, insText, insLog } = elements;
+    const { insPanel, insBtn, insPercent, insProgress, insText } = elements;
     const insBtnLabel = insBtn.querySelector("#ins-btn-label");
 
     if (!job || (job.state === "idle" && !job.started_at)) {
       insPanel.hidden = true;
       insBtn.disabled = false;
-      if (insBtnLabel) insBtnLabel.textContent = "拉取更新";
+      insBtnLabel.textContent = "拉取更新";
       return;
     }
 
@@ -63,9 +58,7 @@
     insPanel.dataset.state = job.state || "idle";
     const progress = Math.max(0, Math.min(100, Number(job.progress || 0)));
     insPercent.textContent = `${progress}%`;
-    insBar.style.width = `${progress}%`;
-    const track = insBar.parentElement;
-    track?.setAttribute("aria-valuenow", String(progress));
+    insProgress.value = progress;
 
     let prefix = "状态";
     if (job.state === "running") prefix = "拉取中";
@@ -73,14 +66,9 @@
     if (job.state === "failed") prefix = "失败";
     insText.textContent = `${prefix}: ${job.message || ""}`;
 
-    const logs = Array.isArray(job.logs) ? job.logs : [];
-    insLog.textContent = logs.slice(-3).join("\n");
-
     const running = job.state === "running";
     insBtn.disabled = running;
-    if (insBtnLabel) {
-      insBtnLabel.textContent = running ? "拉取中..." : "拉取更新";
-    }
+    insBtnLabel.textContent = running ? "拉取中..." : "拉取更新";
   }
 
   function safeHttpUrl(value) {
@@ -102,8 +90,6 @@
     card.className = "card";
     card.dataset.sourceType = String(item.srce_ty || "");
     card.dataset.sourceId = String(item.srce_id || "");
-    // Live item reference: card buttons resolve the entry from the card so
-    // optimistic updates (e.g. undo) rebind handlers to the current object.
     card._liveItem = item;
 
     const head = document.createElement("div");
@@ -169,12 +155,9 @@
     delBtn.setAttribute("aria-label", `移除《${title}》`);
     const actions = document.createElement("div");
     actions.className = "card-actions";
-    actions.appendChild(noticeBtn);
-    actions.appendChild(favBtn);
-    actions.appendChild(delBtn);
+    actions.append(noticeBtn, favBtn, delBtn);
 
-    head.appendChild(h);
-    head.appendChild(actions);
+    head.append(h, actions);
 
     const m1 = document.createElement("p");
     m1.className = "line";
@@ -192,10 +175,7 @@
     abst.className = "abstract";
     abst.textContent = c.abst || "";
 
-    card.appendChild(head);
-    card.appendChild(m1);
-    card.appendChild(m2);
-    card.appendChild(abst);
+    card.append(head, m1, m2, abst);
 
     if (Array.isArray(c.tags) && c.tags.length) {
       const ul = document.createElement("ul");
@@ -208,11 +188,12 @@
       });
       card.appendChild(ul);
     }
+    renderMath(card);
     return card;
   }
 
   function renderTree(treeListEl, state, handlers) {
-    const fragment = document.createDocumentFragment();
+    const groups = [];
     if (!state.treeGroups.length) {
       const empty = document.createElement("li");
       empty.className = "tree-item tree-empty";
@@ -222,49 +203,28 @@
     }
 
     state.treeGroups.forEach((group, groupIndex) => {
-      const groupKey = String(group.name || "");
-      const isCollapsed = state.collapsedGroups.has(groupKey);
       const groupLi = document.createElement("li");
       groupLi.className = "tree-item";
 
-      const title = document.createElement("div");
-      title.className = isCollapsed ? "tree-group-title collapsed" : "tree-group-title";
+      const details = document.createElement("details");
+      details.open = true;
+      const title = document.createElement("summary");
+      title.className = "tree-group-title";
 
       const meta = document.createElement("span");
       meta.className = "tree-group-meta";
       meta.textContent = `${group.name} (${group.count})`;
 
-      const toggle = document.createElement("button");
-      toggle.type = "button";
-      toggle.className = "tree-group-toggle";
-      toggle.dataset.groupKey = groupKey;
-      toggle.textContent = isCollapsed ? "+" : "−";
-      toggle.title = isCollapsed ? "展开" : "折叠";
-      const childrenId = `tree-group-${groupIndex}`;
-      toggle.setAttribute("aria-expanded", String(!isCollapsed));
-      toggle.setAttribute("aria-controls", childrenId);
-      toggle.setAttribute(
-        "aria-label",
-        `${isCollapsed ? "展开" : "折叠"} ${group.name}`
-      );
-      toggle.addEventListener("click", () => {
-        handlers.onToggleGroup(groupKey);
-      });
-
       title.appendChild(meta);
-      title.appendChild(toggle);
-      groupLi.appendChild(title);
+      details.appendChild(title);
 
       const childUl = document.createElement("ul");
       childUl.className = "tree-children";
-      childUl.id = childrenId;
-      childUl.hidden = isCollapsed;
 
       const children = Array.isArray(group.children) ? group.children : [];
       children.forEach((node, childIndex) => {
-        const selectorType = node.selector_type || "tag";
         const selectorValue = node.selector_value || node.name || "";
-        const selector = `${selectorType}:${selectorValue}`;
+        const selector = `tag:${selectorValue}`;
 
         const li = document.createElement("li");
         li.className = "tree-item";
@@ -283,35 +243,23 @@
         });
 
         const text = document.createElement("span");
-        text.textContent = selectorType === "tag"
-          ? `${node.name} (${selectorValue})`
-          : String(node.name);
+        text.textContent = `${node.name} (${selectorValue})`;
 
         const count = document.createElement("span");
         count.className = "tag-count";
         count.textContent = String(node.count ?? 0);
 
-        left.appendChild(checkbox);
-        left.appendChild(text);
-        label.appendChild(left);
-        label.appendChild(count);
+        left.append(checkbox, text);
+        label.append(left, count);
         li.appendChild(label);
         childUl.appendChild(li);
       });
 
-      groupLi.appendChild(childUl);
-      fragment.appendChild(groupLi);
+      details.appendChild(childUl);
+      groupLi.appendChild(details);
+      groups.push(groupLi);
     });
-    treeListEl.replaceChildren(fragment);
+    treeListEl.replaceChildren(...groups);
   }
 
-  global.InfoUI = {
-    setToggle,
-    setMeta,
-    setMoreVisible,
-    renderMath,
-    renderInsJob,
-    makeCard,
-    renderTree
-  };
-})(window);
+export { setToggle, setMeta, renderInsJob, makeCard, renderTree };
