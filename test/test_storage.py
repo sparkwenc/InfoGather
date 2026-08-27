@@ -164,10 +164,8 @@ class InfoStorageTests(unittest.TestCase):
                 search = storage.query_entries(query_text="title")
                 facets = storage.query_facets(
                     configured_tags={"math.AG"},
-                    configured_source_types=set(),
-                    groups=[({"math.AG"}, set())],
+                    groups=[{"math.AG"}],
                     selected_tags=set(),
-                    selected_source_types=set(),
                 )
                 with redirect_stdout(io.StringIO()):
                     storage.insert_entries([
@@ -309,10 +307,8 @@ class InfoStorageTests(unittest.TestCase):
             )
             facets = storage.query_facets(
                 configured_tags={"math.AG", "math.NT"},
-                configured_source_types=set(),
-                groups=[({"math.AG", "math.NT"}, set())],
+                groups=[{"math.AG", "math.NT"}],
                 selected_tags=set(),
-                selected_source_types=set(),
             )
             popped = storage.pop_entry("arXiv", "2601.00001")
             self.assertEqual(storage.query_entries(limit=10)["total"], 0)

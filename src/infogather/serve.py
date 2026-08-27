@@ -53,9 +53,8 @@ def _parse_flag(raw: str) -> bool:
     return raw.strip() == "1"
 
 
-def _parse_selectors(values: list[str]) -> tuple[set[str], set[str]]:
+def _parse_selectors(values: list[str]) -> set[str]:
     tag_values: set[str] = set()
-    source_types: set[str] = set()
     for value in values:
         for part in value.split(","):
             selector = part.strip()
@@ -66,12 +65,7 @@ def _parse_selectors(values: list[str]) -> tuple[set[str], set[str]]:
                 if tag:
                     tag_values.add(tag)
                 continue
-            if selector.startswith("source_type:"):
-                srce_ty = selector[len("source_type:"):].strip()
-                if srce_ty:
-                    source_types.add(srce_ty)
-                continue
-    return tag_values, source_types
+    return tag_values
 
 
 def _encode_cursor(position: tuple[int, str, str] | None) -> str | None:
@@ -118,9 +112,7 @@ def _entry_query_options(query: dict[str, list[str]]) -> dict:
     updated_within_week = _parse_flag(
         query.get("updated_within_week", [""])[0]
     )
-    selected_tags, selected_source_types = _parse_selectors(
-        query.get("selectors", [])
-    )
+    selected_tags = _parse_selectors(query.get("selectors", []))
     now = datetime.now(timezone.utc)
     window = None
     if updated_within_day:
@@ -141,7 +133,6 @@ def _entry_query_options(query: dict[str, list[str]]) -> dict:
             query.get("version_is_not_1", [""])[0]
         ),
         "selected_tags": selected_tags,
-        "selected_source_types": selected_source_types,
         "query_text": query.get("q", [""])[0].strip(),
     }
 
@@ -292,50 +283,22 @@ def _load_configured_sources(conf_path: Path) -> list[dict]:
     with conf_path.open("rb") as f:
         conf = tomllib.load(f)
 
-    groups: list[dict] = []
-    for srce_ty, raw_sources in conf.items():
-        if not isinstance(raw_sources, list):
+    raw_sources = conf.get("arXiv", [])
+    if not isinstance(raw_sources, list):
+        return []
+    children = []
+    seen = set()
+    for idx, item in enumerate(raw_sources):
+        if not isinstance(item, dict):
             continue
-
-        children = []
-        seen = set()
-        for idx, item in enumerate(raw_sources):
-            if not isinstance(item, dict):
-                continue
-
-            name = str(item.get("name", "")).strip() or f"{srce_ty}-{idx + 1}"
-            url = str(item.get("url", "")).strip()
-
-            if srce_ty == "arXiv":
-                tag = _extract_arxiv_tag(url)
-                if not tag or tag in seen:
-                    continue
-                seen.add(tag)
-                children.append(
-                    {
-                        "name": name,
-                        "url": url,
-                        "selector_type": "tag",
-                        "selector_value": tag,
-                    }
-                )
-                continue
-
-            key = (name, url)
-            if key in seen:
-                continue
-            seen.add(key)
-            children.append(
-                {
-                    "name": name,
-                    "url": url,
-                    "selector_type": "source_type",
-                    "selector_value": str(srce_ty),
-                }
-            )
-
-        groups.append({"name": str(srce_ty), "children": children})
-    return groups
+        name = str(item.get("name", "")).strip() or f"arXiv-{idx + 1}"
+        url = str(item.get("url", "")).strip()
+        tag = _extract_arxiv_tag(url)
+        if not tag or tag in seen:
+            continue
+        seen.add(tag)
+        children.append({"name": name, "url": url, "selector_value": tag})
+    return [{"name": "arXiv", "children": children}]
 
 
 def _normalize_db_path(raw_path: str) -> str | Path:
@@ -458,33 +421,17 @@ class InfoHandler(SimpleHTTPRequestHandler):
                 str(child.get("selector_value", ""))
                 for group in configured_groups
                 for child in group.get("children", [])
-                if child.get("selector_type") == "tag"
             }
-            configured_source_types = {
-                str(child.get("selector_value", ""))
+            group_selectors = [
+                {
+                    str(child.get("selector_value", ""))
+                    for child in group.get("children", [])
+                }
                 for group in configured_groups
-                for child in group.get("children", [])
-                if child.get("selector_type") == "source_type"
-            }
-            group_selectors = []
-            for group in configured_groups:
-                children = group.get("children", [])
-                group_selectors.append((
-                    {
-                        str(child.get("selector_value", ""))
-                        for child in children
-                        if child.get("selector_type") == "tag"
-                    },
-                    {
-                        str(child.get("selector_value", ""))
-                        for child in children
-                        if child.get("selector_type") == "source_type"
-                    },
-                ))
+            ]
             with InfoStorage(str(self._db_path)) as storage:
                 facets = storage.query_facets(
                     configured_tags=configured_tags,
-                    configured_source_types=configured_source_types,
                     groups=group_selectors,
                     **options,
                 )
@@ -501,22 +448,12 @@ class InfoHandler(SimpleHTTPRequestHandler):
             srce_ty = str(group.get("name", ""))
             children = []
             for item in group.get("children", []):
-                selector_type = str(item.get("selector_type", ""))
                 selector_value = str(item.get("selector_value", ""))
-                count = 0
-                if selector_type == "tag":
-                    count = int(facets["tag_counts"].get(selector_value, 0))
-                elif selector_type == "source_type":
-                    count = int(
-                        facets["source_type_counts"].get(selector_value, 0)
-                    )
-
                 children.append(
                     {
                         "name": str(item.get("name", "")),
-                        "selector_type": selector_type,
                         "selector_value": selector_value,
-                        "count": count,
+                        "count": int(facets["tag_counts"].get(selector_value, 0)),
                     }
                 )
 

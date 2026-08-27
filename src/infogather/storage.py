@@ -228,7 +228,6 @@ class InfoStorage:
         version_is_1: bool = False,
         version_is_not_1: bool = False,
         selected_tags: set[str] | None = None,
-        selected_source_types: set[str] | None = None,
         query_text: str = "",
         limit: int = 30,
         cursor: tuple[int, str, str] | None = None,
@@ -244,7 +243,6 @@ class InfoStorage:
             version_is_1=version_is_1,
             version_is_not_1=version_is_not_1,
             selected_tags=selected_tags or set(),
-            selected_source_types=selected_source_types or set(),
             query_text=query_text,
         )
         page_where = list(where)
@@ -309,8 +307,7 @@ class InfoStorage:
         self,
         *,
         configured_tags: set[str],
-        configured_source_types: set[str],
-        groups: list[tuple[set[str], set[str]]],
+        groups: list[set[str]],
         **filters: object,
     ) -> dict:
         """Count configured facets from canonical entry JSON."""
@@ -343,32 +340,11 @@ class InfoStorage:
                 tag_counts = {
                     str(row["tag"]): int(row["entry_count"]) for row in rows
                 }
-            source_type_counts: dict[str, int] = {}
-            if configured_source_types:
-                placeholders = ",".join("?" for _ in configured_source_types)
-                rows = conn.execute(
-                    f"""
-                    SELECT e.srce_ty, COUNT(*) AS entry_count
-                    FROM tab_entries AS e
-                    {self._where_sql([
-                        *where,
-                        f"e.srce_ty IN ({placeholders})",
-                    ])}
-                    GROUP BY e.srce_ty
-                    """,
-                    [*params, *sorted(configured_source_types)],
-                ).fetchall()
-                source_type_counts = {
-                    str(row["srce_ty"]): int(row["entry_count"]) for row in rows
-                }
-
             # ponytail: repeated scans avoid duplicate indexes; add measured
             # materialized indexes only if facet latency becomes visible.
             group_counts = []
-            for group_tags, group_source_types in groups:
-                group_clause, group_params = self._selector_sql(
-                    group_tags, group_source_types
-                )
+            for group_tags in groups:
+                group_clause, group_params = self._selector_sql(group_tags)
                 if not group_clause:
                     group_counts.append(0)
                     continue
@@ -382,7 +358,6 @@ class InfoStorage:
         return {
             "total": int(total),
             "tag_counts": tag_counts,
-            "source_type_counts": source_type_counts,
             "group_counts": group_counts,
         }
 
@@ -730,27 +705,17 @@ class InfoStorage:
     @staticmethod
     def _selector_sql(
         selected_tags: set[str],
-        selected_source_types: set[str],
         *,
         alias: str = "e",
     ) -> tuple[str, list[object]]:
-        options = []
-        params: list[object] = []
-        if selected_source_types:
-            placeholders = ",".join("?" for _ in selected_source_types)
-            options.append(f"{alias}.srce_ty IN ({placeholders})")
-            params.extend(sorted(selected_source_types))
-        if selected_tags:
-            placeholders = ",".join("?" for _ in selected_tags)
-            options.append(
-                f"""EXISTS (
-                    SELECT 1 FROM json_each({alias}.content, '$.tags') AS selected_tag
-                    WHERE selected_tag.type = 'text'
-                      AND selected_tag.value IN ({placeholders})
-                )"""
-            )
-            params.extend(sorted(selected_tags))
-        return (f"({' OR '.join(options)})" if options else ""), params
+        if not selected_tags:
+            return "", []
+        placeholders = ",".join("?" for _ in selected_tags)
+        return f"""EXISTS (
+            SELECT 1 FROM json_each({alias}.content, '$.tags') AS selected_tag
+            WHERE selected_tag.type = 'text'
+              AND selected_tag.value IN ({placeholders})
+        )""", sorted(selected_tags)
 
     @classmethod
     def _entry_filter_sql(
@@ -763,7 +728,6 @@ class InfoStorage:
         version_is_1: bool = False,
         version_is_not_1: bool = False,
         selected_tags: set[str] | None = None,
-        selected_source_types: set[str] | None = None,
         query_text: str = "",
     ) -> tuple[list[str], list[object]]:
         conditions: list[str] = []
@@ -782,9 +746,7 @@ class InfoStorage:
             conditions.append("e.version = 1")
         if version_is_not_1:
             conditions.append("e.version <> 1")
-        selector_clause, selector_params = cls._selector_sql(
-            selected_tags or set(), selected_source_types or set()
-        )
+        selector_clause, selector_params = cls._selector_sql(selected_tags or set())
         if selector_clause:
             conditions.append(selector_clause)
             params.extend(selector_params)

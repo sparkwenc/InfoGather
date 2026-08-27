@@ -1,13 +1,12 @@
 import time
 import http.client
 import feedparser
-import calendar
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from urllib.error import HTTPError
 from urllib.parse import urlparse
-
-import httpx
+from urllib.request import Request, urlopen
 
 
 MAX_FEED_BYTES = 8 * 1024 * 1024
@@ -24,23 +23,14 @@ class InfoSources:
         self._feed_states = feed_states or {}
         self._max_workers = max(1, max_workers)
         self.feed_state_updates: dict[str, dict] = {}
-        self.failed_count = 0
 
     def get_normalized_feeds(self) -> list:
         """return normalized entries from all sources"""
         raw_feeds = self._fetch_raw_feeds()
 
         print("Normalizing feeds...")
-        normalized = []
-
-        for srce_ty, feeds in raw_feeds.items():
-            fn = getattr(self, f"_normalized_{srce_ty}", None)
-            if fn is None or not callable(fn):
-                print(f"{srce_ty:5s}: unknown source type, skipped")
-                continue
-            result = fn(feeds)
-            print(f"{srce_ty:5s}: {len(result):3d} normalized")
-            normalized.extend(result)
+        normalized = self._normalized_arXiv(raw_feeds)
+        print(f"arXiv: {len(normalized):3d} normalized")
         deduplicated = self._deduplicate_entries(normalized)
         duplicate_count = len(normalized) - len(deduplicated)
         if duplicate_count:
@@ -49,32 +39,27 @@ class InfoSources:
         return deduplicated
 
     # internal methods
-    def _fetch_raw_feeds(self) -> dict:
+    def _fetch_raw_feeds(self) -> list:
         """fetch all feeds according to the configuration"""
 
-        feeds: dict[str, list] = {}
+        feeds = []
         requests = []
         seen_urls = set()
-        for srce_ty, raw_sources in self._conf.items():
-            normalizer = getattr(self, f"_normalized_{srce_ty}", None)
-            if not callable(normalizer):
-                print(f"{srce_ty:5s}: unknown source type, skipped")
+        raw_sources = self._conf.get("arXiv", [])
+        if not isinstance(raw_sources, list):
+            raise ValueError("source group 'arXiv' must be a list")
+        for item in raw_sources:
+            if not isinstance(item, dict):
+                raise ValueError("source in 'arXiv' must be a table")
+            name = str(item.get("name", "")).strip() or "unknown"
+            url = str(item.get("url", "")).strip()
+            if not url:
+                raise ValueError(f"source {name!r} has no URL")
+            if url in seen_urls:
+                print(f"      duplicate URL skipped: {name}")
                 continue
-            if not isinstance(raw_sources, list):
-                raise ValueError(f"source group {srce_ty!r} must be a list")
-            feeds[srce_ty] = []
-            for item in raw_sources:
-                if not isinstance(item, dict):
-                    raise ValueError(f"source in {srce_ty!r} must be a table")
-                name = str(item.get("name", "")).strip() or "unknown"
-                url = str(item.get("url", "")).strip()
-                if not url:
-                    raise ValueError(f"source {name!r} has no URL")
-                if url in seen_urls:
-                    print(f"      duplicate URL skipped: {name}")
-                    continue
-                seen_urls.add(url)
-                requests.append((srce_ty, name, url))
+            seen_urls.add(url)
+            requests.append((name, url))
 
         total = len(requests)
         print(
@@ -90,40 +75,29 @@ class InfoSources:
         cached = 0
         failed = 0
         total_entries = 0
-        for srce_ty, name, url in requests:
+        for name, url in requests:
             state = self._feed_states.get(url, {})
             if float(state.get("next_fetch_at", 0) or 0) > now:
                 completed += 1
                 cached += 1
                 print(f"SOURCE {completed}/{total}: cached {name}")
                 continue
-            pending.append((srce_ty, name, url, state))
+            pending.append((name, url, state))
 
-        limits = httpx.Limits(
-            max_connections=self._max_workers,
-            max_keepalive_connections=self._max_workers,
-        )
-        timeout = httpx.Timeout(12.0, connect=4.0)
-        with httpx.Client(
-            follow_redirects=True,
-            headers={"User-Agent": "InfoGather/0.1 (+local RSS reader)"},
-            limits=limits,
-            timeout=timeout,
-        ) as client, ThreadPoolExecutor(
+        with ThreadPoolExecutor(
             max_workers=min(self._max_workers, max(len(pending), 1))
         ) as executor:
             futures = {
                 executor.submit(
                     self._fetch_feed,
-                    client,
                     url,
                     name,
                     state,
-                ): (srce_ty, name, url)
-                for srce_ty, name, url, state in pending
+                ): (name, url)
+                for name, url, state in pending
             }
             for future in as_completed(futures):
-                srce_ty, name, url = futures[future]
+                name, url = futures[future]
                 completed += 1
                 try:
                     feed, state_update = future.result()
@@ -133,7 +107,7 @@ class InfoSources:
                         print(f"SOURCE {completed}/{total}: not modified {name}")
                         continue
                     count = len(feed.get("entries", []))
-                    feeds[srce_ty].append(feed)
+                    feeds.append(feed)
                     total_entries += count
                     print(f"SOURCE {completed}/{total}: {count:3d} from {name}")
                 except Exception as exc:
@@ -144,14 +118,12 @@ class InfoSources:
             f"Fetch result: {total_entries} entries, {cached} cached, "
             f"{failed} failed from {total} feeds\n"
         )
-        self.failed_count = failed
         if failed == total and not cached:
             raise RuntimeError("all configured feeds failed")
         return feeds
 
     @staticmethod
     def _fetch_feed(
-        client: httpx.Client,
         url: str,
         name: str,
         state: dict | None = None,
@@ -172,10 +144,10 @@ class InfoSources:
             try:
                 status_code, response_headers, response_content = (
                     InfoSources._read_feed_response(
-                        client, url, headers=headers, name=name
+                        url, headers=headers, name=name
                     )
                 )
-            except (http.client.IncompleteRead, httpx.TransportError) as exc:
+            except (http.client.HTTPException, OSError) as exc:
                 if attempt >= attempts:
                     raise
                 print(
@@ -232,35 +204,30 @@ class InfoSources:
 
     @staticmethod
     def _read_feed_response(
-        client: httpx.Client,
         url: str,
         *,
         headers: dict[str, str],
         name: str,
     ) -> tuple[int, object, bytes]:
-        # Tests and callers may provide a minimal client double. Production
-        # httpx clients use streaming so the cap applies before buffering.
-        if not isinstance(client, httpx.Client):
-            response = client.get(url, headers=headers)
-            if response.status_code == 304 or not 200 <= response.status_code < 300:
-                return response.status_code, response.headers, b""
-            InfoSources._validate_content_length(response.headers, name)
-            content = response.content
-            if len(content) > MAX_FEED_BYTES:
-                raise RuntimeError(f"{name}: feed response is too large")
-            return response.status_code, response.headers, content
-
-        with client.stream("GET", url, headers=headers) as response:
-            response_headers = httpx.Headers(response.headers)
-            if response.status_code == 304 or not 200 <= response.status_code < 300:
-                return response.status_code, response_headers, b""
+        request = Request(
+            url,
+            headers={
+                "User-Agent": "InfoGather/0.1 (+local RSS reader)",
+                **headers,
+            },
+        )
+        try:
+            response = urlopen(request, timeout=12)
+        except HTTPError as exc:
+            return exc.code, exc.headers, b""
+        with response:
+            response_headers = response.headers
+            status_code = response.status
             InfoSources._validate_content_length(response_headers, name)
-            body = bytearray()
-            for chunk in response.iter_bytes():
-                if len(body) + len(chunk) > MAX_FEED_BYTES:
-                    raise RuntimeError(f"{name}: feed response is too large")
-                body.extend(chunk)
-            return response.status_code, response_headers, bytes(body)
+            content = response.read(MAX_FEED_BYTES + 1)
+        if len(content) > MAX_FEED_BYTES:
+            raise RuntimeError(f"{name}: feed response is too large")
+        return status_code, response_headers, content
 
     @staticmethod
     def _validate_content_length(headers: object, name: str) -> None:
@@ -342,34 +309,14 @@ class InfoSources:
         return list(unique.values())
 
     @staticmethod
-    def _feed_updated_iso(feed: dict) -> str:
-        feed_meta = feed.get("feed", {})
-        iso = InfoSources._first_parsed_iso(
-            feed_meta.get("updated_parsed"),
-            feed_meta.get("published_parsed"),
-        )
-        return iso or datetime.now(timezone.utc).isoformat()
-
-    @staticmethod
-    def _entry_updated_iso(entry: dict, feed_fallback: str) -> str:
-        """Per-entry update timestamp (paper announcement date), falling
-        back to the feed timestamp when the entry carries no date."""
-        iso = InfoSources._first_parsed_iso(
-            entry.get("updated_parsed"),
-            entry.get("published_parsed"),
-        )
-        return iso or feed_fallback
-
-    @staticmethod
-    def _first_parsed_iso(*candidates: object) -> str | None:
-        for candidate in candidates:
+    def _parsed_iso(value: dict) -> str | None:
+        for key in ("updated_parsed", "published_parsed"):
+            candidate = value.get(key)
             if candidate is None:
                 continue
             try:
-                st = time.struct_time(candidate)
-                return datetime.fromtimestamp(
-                    calendar.timegm(st),
-                    timezone.utc,
+                return datetime(
+                    *time.struct_time(candidate)[:6], tzinfo=timezone.utc
                 ).isoformat()
             except (TypeError, ValueError, OverflowError):
                 continue
@@ -381,7 +328,8 @@ class InfoSources:
         normalized = []
         for feed in feeds:
             entries = feed.get("entries", [])
-            feed_dt = self._feed_updated_iso(feed)
+            feed_dt = self._parsed_iso(feed.get("feed", {}))
+            feed_dt = feed_dt or datetime.now(timezone.utc).isoformat()
 
             for entry in entries:
                 try:
@@ -412,7 +360,7 @@ class InfoSources:
                     "version": version,
                     "favored": 0,
                     "noticed": 0,
-                    "updated": self._entry_updated_iso(entry, feed_dt),
+                    "updated": self._parsed_iso(entry) or feed_dt,
                     "content": {
                         "link": entry.get("link"),
                         "titl": entry.get("title"),

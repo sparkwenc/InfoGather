@@ -1,134 +1,89 @@
+import io
 import unittest
 import time
 from datetime import datetime
 from http.client import IncompleteRead
-from unittest.mock import Mock, patch
-
-import httpx
+from urllib.error import HTTPError
+from unittest.mock import patch
 
 from infogather.sources import InfoSources, MAX_FEED_BYTES
 
 
+class Response(io.BytesIO):
+    def __init__(self, body: bytes = b"", *, status: int = 200, headers=None):
+        super().__init__(body)
+        self.status = status
+        self.headers = headers or {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+
 class InfoSourcesTests(unittest.TestCase):
-    def test_fetch_feed_retries_incomplete_read(self) -> None:
-        feed = {"entries": []}
-        client = Mock()
-        client.get.side_effect = [
+    def test_fetch_feed_retries_transient_failures(self) -> None:
+        failures = [
             IncompleteRead(b"partial", 10),
-            httpx.Response(200, headers={"cache-control": "max-age=60"}),
+            HTTPError("url", 503, "unavailable", {}, None),
+            TimeoutError("timed out"),
         ]
-        with (
-            patch("infogather.sources.feedparser.parse", return_value=feed) as parse,
-            patch("infogather.sources.time.sleep") as sleep,
-            patch("builtins.print"),
-        ):
-            result, state = InfoSources._fetch_feed(
-                client,
-                "https://rss.arxiv.org/rss/math.NT",
-                "Number Theory",
-                attempts=2,
-                delay=0,
-            )
-
-        self.assertIs(result, feed)
-        self.assertGreater(state["next_fetch_at"], 0)
-        self.assertEqual(client.get.call_count, 2)
-        self.assertEqual(parse.call_count, 1)
-        sleep.assert_called_once_with(0)
-
-    def test_fetch_feed_reraises_incomplete_read_after_retries(self) -> None:
-        errors = [IncompleteRead(b"partial", 10), IncompleteRead(b"partial", 10)]
-        client = Mock()
-        client.get.side_effect = errors
-        with (
-            patch("infogather.sources.time.sleep") as sleep,
-            patch("builtins.print"),
-        ):
-            with self.assertRaises(IncompleteRead):
-                InfoSources._fetch_feed(
-                    client,
+        for failure in failures:
+            with (
+                self.subTest(failure=type(failure).__name__),
+                patch(
+                    "infogather.sources.urlopen",
+                    side_effect=[failure, Response(headers={"cache-control": "max-age=60"})],
+                ) as open_url,
+                patch("infogather.sources.feedparser.parse", return_value={"entries": []}),
+                patch("infogather.sources.time.sleep") as sleep,
+                patch("builtins.print"),
+            ):
+                result, state = InfoSources._fetch_feed(
                     "https://rss.arxiv.org/rss/math.NT",
                     "Number Theory",
                     attempts=2,
                     delay=0,
                 )
 
-        self.assertEqual(client.get.call_count, 2)
-        sleep.assert_called_once_with(0)
+            self.assertEqual(result, {"entries": []})
+            self.assertGreater(state["next_fetch_at"], 0)
+            self.assertEqual(open_url.call_count, 2)
+            sleep.assert_called_once_with(0)
 
-    def test_fetch_feed_retries_http_failure(self) -> None:
-        feed = {"entries": []}
-        client = Mock()
-        client.get.side_effect = [httpx.Response(503), httpx.Response(200)]
+    def test_fetch_feed_reraises_incomplete_read_after_retries(self) -> None:
+        errors = [IncompleteRead(b"partial", 10), IncompleteRead(b"partial", 10)]
         with (
-            patch("infogather.sources.feedparser.parse", return_value=feed) as parse,
+            patch("infogather.sources.urlopen", side_effect=errors) as open_url,
             patch("infogather.sources.time.sleep") as sleep,
             patch("builtins.print"),
         ):
-            result, _ = InfoSources._fetch_feed(
-                client,
-                "https://rss.arxiv.org/rss/math.NT",
-                "Number Theory",
-                attempts=2,
-                delay=0,
-            )
+            with self.assertRaises(IncompleteRead):
+                InfoSources._fetch_feed(
+                    "https://rss.arxiv.org/rss/math.NT",
+                    "Number Theory",
+                    attempts=2,
+                    delay=0,
+                )
 
-        self.assertIs(result, feed)
-        self.assertEqual(client.get.call_count, 2)
-        self.assertEqual(parse.call_count, 1)
-        sleep.assert_called_once_with(0)
-
-    def test_fetch_feed_retries_timeout(self) -> None:
-        feed = {"entries": []}
-        client = Mock()
-        client.get.side_effect = [
-            httpx.ReadTimeout("timed out"),
-            httpx.Response(200),
-        ]
-        with (
-            patch("infogather.sources.feedparser.parse", return_value=feed),
-            patch("infogather.sources.time.sleep") as sleep,
-            patch("builtins.print"),
-        ):
-            result, _ = InfoSources._fetch_feed(
-                client,
-                "https://rss.arxiv.org/rss/math.NT",
-                "Number Theory",
-                attempts=2,
-                delay=0,
-            )
-
-        self.assertIs(result, feed)
-        self.assertEqual(client.get.call_count, 2)
+        self.assertEqual(open_url.call_count, 2)
         sleep.assert_called_once_with(0)
 
     def test_fetch_feed_rejects_oversized_response(self) -> None:
-        client = Mock()
-        client.get.return_value = httpx.Response(
-            200,
-            headers={"content-length": str(MAX_FEED_BYTES + 1)},
-        )
-
-        with self.assertRaisesRegex(RuntimeError, "too large"):
-            InfoSources._fetch_feed(
-                client,
-                "https://rss.arxiv.org/rss/math.NT",
-                "Number Theory",
-            )
-
-    def test_fetch_feed_streaming_cap_handles_chunked_response(self) -> None:
-        class OversizedStream(httpx.SyncByteStream):
-            def __iter__(self):
-                yield b"x" * MAX_FEED_BYTES
-                yield b"x"
-
-        def handler(_: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, stream=OversizedStream())
-
-        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        response = Response(headers={"content-length": str(MAX_FEED_BYTES + 1)})
+        with patch("infogather.sources.urlopen", return_value=response):
             with self.assertRaisesRegex(RuntimeError, "too large"):
                 InfoSources._fetch_feed(
-                    client,
+                    "https://rss.arxiv.org/rss/math.NT",
+                    "Number Theory",
+                )
+
+    def test_fetch_feed_streaming_cap_handles_chunked_response(self) -> None:
+        response = Response(b"x" * (MAX_FEED_BYTES + 1))
+        with patch("infogather.sources.urlopen", return_value=response):
+            with self.assertRaisesRegex(RuntimeError, "too large"):
+                InfoSources._fetch_feed(
                     "https://rss.arxiv.org/rss/math.NT",
                     "Number Theory",
                     attempts=1,
@@ -140,16 +95,17 @@ class InfoSourcesTests(unittest.TestCase):
             "bozo_exception": ValueError("truncated XML"),
             "entries": [{"id": "oai:arXiv.org:2601.00001v1"}],
         }
-        client = Mock()
-        client.get.return_value = httpx.Response(200)
         with (
+            patch(
+                "infogather.sources.urlopen",
+                side_effect=[Response(), Response()],
+            ),
             patch("infogather.sources.feedparser.parse", return_value=malformed),
             patch("infogather.sources.time.sleep"),
             patch("builtins.print"),
         ):
             with self.assertRaisesRegex(RuntimeError, "invalid feed"):
                 InfoSources._fetch_feed(
-                    client,
                     "https://rss.arxiv.org/rss/math.NT",
                     "Number Theory",
                     attempts=2,
@@ -157,36 +113,31 @@ class InfoSourcesTests(unittest.TestCase):
                 )
 
     def test_fetch_feed_uses_conditional_etag(self) -> None:
-        client = Mock()
-        client.get.return_value = httpx.Response(
+        not_modified = HTTPError(
+            "https://rss.arxiv.org/rss/math.NT",
             304,
-            headers={
-                "cache-control": "max-age=120",
-                "age": "90",
-                "etag": "new",
-                "content-length": str(MAX_FEED_BYTES + 1),
-            },
+            "not modified",
+            {"cache-control": "max-age=120", "age": "90", "etag": "new"},
+            None,
         )
 
         before = time.time()
-        feed, state = InfoSources._fetch_feed(
-            client,
-            "https://rss.arxiv.org/rss/math.NT",
-            "Number Theory",
-            {"etag": "old", "last_modified": "yesterday"},
-        )
+        with patch(
+            "infogather.sources.urlopen", side_effect=not_modified
+        ) as open_url:
+            feed, state = InfoSources._fetch_feed(
+                "https://rss.arxiv.org/rss/math.NT",
+                "Number Theory",
+                {"etag": "old", "last_modified": "yesterday"},
+            )
 
         self.assertIsNone(feed)
         self.assertEqual(state["etag"], "new")
         self.assertGreaterEqual(state["next_fetch_at"], before + 29)
         self.assertLessEqual(state["next_fetch_at"], before + 31)
-        client.get.assert_called_once_with(
-            "https://rss.arxiv.org/rss/math.NT",
-            headers={
-                "If-None-Match": "old",
-                "If-Modified-Since": "yesterday",
-            },
-        )
+        request = open_url.call_args.args[0]
+        self.assertEqual(request.get_header("If-none-match"), "old")
+        self.assertEqual(request.get_header("If-modified-since"), "yesterday")
 
     def test_fetch_raw_feeds_skips_fresh_cache(self) -> None:
         url = "https://rss.arxiv.org/rss/math.NT"
@@ -199,7 +150,7 @@ class InfoSourcesTests(unittest.TestCase):
             feeds = source._fetch_raw_feeds()
 
         fetch.assert_not_called()
-        self.assertEqual(feeds, {"arXiv": []})
+        self.assertEqual(feeds, [])
 
     def test_deduplicate_entries_keeps_newest_and_merges_tags(self) -> None:
         first = {
