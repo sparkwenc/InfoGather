@@ -1,14 +1,11 @@
 from .storage import InfoStorage
 from .paths import DEFAULT_CONFIG_PATH, DEFAULT_DB_PATH, WEB_DIR
+from .cli import _cmd_ins
 
 import argparse
 import base64
 import json
-import os
-import re
 import secrets
-import subprocess
-import sys
 import threading
 import tomllib
 from datetime import datetime, timedelta, timezone
@@ -19,10 +16,6 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
-DEFAULT_CONF_PATH = DEFAULT_CONFIG_PATH
-
-SOURCE_PROGRESS_RE = re.compile(r"^SOURCE\s+(\d+)\s*/\s*(\d+):")
-
 INS_LOCK = threading.Lock()
 INS_JOB = {
     "state": "idle",  # idle | running | succeeded | failed
@@ -30,8 +23,6 @@ INS_JOB = {
     "message": "就绪",
     "started_at": None,
     "ended_at": None,
-    "returncode": None,
-    "logs": [],
 }
 REMOVE_UNDO_LOCK = threading.Lock()
 REMOVE_UNDO = {"token": None, "entry": None}
@@ -152,15 +143,7 @@ def _utcnow_iso() -> str:
 
 
 def _ins_snapshot_unlocked() -> dict:
-    return {
-        "state": INS_JOB["state"],
-        "progress": INS_JOB["progress"],
-        "message": INS_JOB["message"],
-        "started_at": INS_JOB["started_at"],
-        "ended_at": INS_JOB["ended_at"],
-        "returncode": INS_JOB["returncode"],
-        "logs": list(INS_JOB["logs"]),
-    }
+    return dict(INS_JOB)
 
 
 def _ins_snapshot() -> dict:
@@ -173,108 +156,31 @@ def _ins_update(**kwargs: object) -> None:
         INS_JOB.update(kwargs)
 
 
-def _ins_append_log(line: str) -> None:
-    with INS_LOCK:
-        INS_JOB["logs"].append(line)
-        if len(INS_JOB["logs"]) > 120:
-            INS_JOB["logs"] = INS_JOB["logs"][-120:]
-
-
 def _clear_removed_entry() -> None:
     with REMOVE_UNDO_LOCK:
         REMOVE_UNDO["token"] = None
         REMOVE_UNDO["entry"] = None
 
 
-def _ins_progress_from_line(line: str, current: int) -> tuple[int, str]:
-    if line.startswith("Fetching ") and "feeds" in line:
-        return max(current, 8), "开始抓取源"
-
-    source_match = SOURCE_PROGRESS_RE.search(line)
-    if source_match:
-        idx = int(source_match.group(1))
-        total = max(int(source_match.group(2)), 1)
-        progress = 10 + int((idx / total) * 50)
-        return max(current, progress), f"抓取源 {idx}/{total}"
-
-    if "Normalizing feeds..." in line:
-        return max(current, 62), "正在归一化"
-
-    if "Insert result:" in line:
-        return max(current, 95), "正在写入数据库"
-
-    if line.strip():
-        return min(max(current, 8) + 1, 90), line.strip()
-
-    return current, "处理中"
-
-
 def _run_ins_job(db_path: str | Path, conf_path: Path) -> None:
-    env = os.environ.copy()
-    env["PYTHONUNBUFFERED"] = "1"
-    cmd = [sys.executable, "-m", "infogather.cli"]
-    cmd.extend([
-        "--db-path", str(db_path),
-        "ins", "--conf", str(conf_path),
-    ])
-    _ins_append_log(f"$ {' '.join(cmd)}")
-
-    proc = None
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=env,
+        _ins_update(progress=10, message="正在拉取")
+        _cmd_ins(
+            argparse.Namespace(db_path=db_path, conf=conf_path)
         )
-        assert proc.stdout is not None
-        had_warnings = False
-        for raw_line in proc.stdout:
-            line = raw_line.rstrip("\n")
-            if line.startswith("SOURCE ") and ": failed " in line:
-                had_warnings = True
-            _ins_append_log(line)
-            snap = _ins_snapshot()
-            progress, message = _ins_progress_from_line(
-                line, int(snap["progress"]))
-            _ins_update(progress=progress, message=message)
-
-        returncode = proc.wait()
-        if returncode == 0:
-            _ins_update(
-                state="succeeded",
-                progress=100,
-                message="拉取完成，部分源失败" if had_warnings else "拉取完成",
-                ended_at=_utcnow_iso(),
-                returncode=0,
-            )
-            return
         _ins_update(
-            state="failed",
-            progress=max(int(_ins_snapshot()["progress"]), 1),
-            message=f"拉取失败 (exit={returncode})",
+            state="succeeded",
+            progress=100,
+            message="拉取完成",
             ended_at=_utcnow_iso(),
-            returncode=returncode,
         )
     except Exception as exc:
-        if proc is not None:
-            terminate = getattr(proc, "terminate", None)
-            if callable(terminate):
-                try:
-                    terminate()
-                except OSError:
-                    pass
         _ins_update(
             state="failed",
             progress=max(int(_ins_snapshot()["progress"]), 1),
             message=f"拉取失败: {exc}",
             ended_at=_utcnow_iso(),
-            returncode=-1,
         )
-        _ins_append_log(f"[error] {exc}")
 
 
 def _load_configured_sources(conf_path: Path) -> list[dict]:
@@ -323,8 +229,6 @@ class InfoHandler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path.startswith("/api/"):
             self.send_header("Cache-Control", "no-store")
-        elif parsed.path.endswith((".css", ".js")) and "v=" in parsed.query:
-            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
         else:
             self.send_header("Cache-Control", "no-cache")
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -778,8 +682,6 @@ class InfoHandler(SimpleHTTPRequestHandler):
             INS_JOB["message"] = "启动中"
             INS_JOB["started_at"] = _utcnow_iso()
             INS_JOB["ended_at"] = None
-            INS_JOB["returncode"] = None
-            INS_JOB["logs"] = []
 
         worker = threading.Thread(
             target=_run_ins_job,
@@ -804,7 +706,7 @@ def main() -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--db-path", default=str(DEFAULT_DB_PATH))
-    parser.add_argument("--conf", default=str(DEFAULT_CONF_PATH))
+    parser.add_argument("--conf", default=str(DEFAULT_CONFIG_PATH))
     args = parser.parse_args()
 
     db_path = _normalize_db_path(args.db_path)
@@ -812,17 +714,15 @@ def main() -> int:
     with InfoStorage(db_path):
         pass
     handler = partial(InfoHandler, db_path=db_path, conf_path=conf_path)
-    server = ThreadingHTTPServer((args.host, args.port), handler)
-    print(
-        f"Serving on http://{args.host}:{args.port} "
-        f"(db: {db_path}, conf: {conf_path})"
-    )
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\nStopped.")
-    finally:
-        server.server_close()
+    with ThreadingHTTPServer((args.host, args.port), handler) as server:
+        print(
+            f"Serving on http://{args.host}:{args.port} "
+            f"(db: {db_path}, conf: {conf_path})"
+        )
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            print("\nStopped.")
     return 0
 
 

@@ -1,5 +1,4 @@
 import io
-import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -15,7 +14,6 @@ from infogather.serve import (
     _decode_cursor,
     _encode_cursor,
     _normalize_db_path,
-    _ins_progress_from_line,
     _run_ins_job,
 )
 import infogather.serve as serve
@@ -78,38 +76,17 @@ class ServeInsTests(unittest.TestCase):
             serve.INS_JOB["message"] = "test"
             serve.INS_JOB["started_at"] = None
             serve.INS_JOB["ended_at"] = None
-            serve.INS_JOB["returncode"] = None
-            serve.INS_JOB["logs"] = []
 
     def test_run_ins_job_passes_database_and_config_paths(self) -> None:
-        captured: dict[str, object] = {}
-
-        class _FakeProc:
-            def __init__(self, cmd, **kwargs):
-                captured["cmd"] = cmd
-                self.stdout = []
-
-            def wait(self) -> int:
-                return 0
-
-        with mock.patch.object(serve.subprocess, "Popen", side_effect=_FakeProc):
+        with mock.patch.object(serve, "_cmd_ins", return_value=0) as command:
             db_path = Path("/tmp/custom-entries.db")
             conf_path = Path("/tmp/custom-config.toml")
             _run_ins_job(db_path, conf_path)
 
-        self.assertEqual(
-            captured["cmd"],
-            [
-                sys.executable,
-                "-m",
-                "infogather.cli",
-                "--db-path",
-                str(db_path),
-                "ins",
-                "--conf",
-                str(conf_path),
-            ],
-        )
+        args = command.call_args.args[0]
+        self.assertEqual(args.db_path, db_path)
+        self.assertEqual(args.conf, conf_path)
+        self.assertEqual(serve.INS_JOB["state"], "succeeded")
 
     def test_web_assets_are_packaged_with_server(self) -> None:
         self.assertTrue((serve.WEB_DIR / "index.html").is_file())
@@ -125,35 +102,6 @@ class ServeInsTests(unittest.TestCase):
         self.assertEqual(_decode_cursor(_encode_cursor(position)), position)
         with self.assertRaisesRegex(ValueError, "invalid cursor"):
             _encode_cursor((2 ** 80, "arXiv", "2601.00001"))
-
-    def test_source_progress_line_reports_completed_feeds(self) -> None:
-        progress, message = _ins_progress_from_line(
-            "SOURCE 4/17: 20 from Example",
-            8,
-        )
-
-        self.assertEqual(progress, 21)
-        self.assertEqual(message, "抓取源 4/17")
-
-    def test_run_ins_job_reports_partial_failure(self) -> None:
-        class _FakeProc:
-            stdout = [
-                "SOURCE 1/2: failed Example: timeout\n",
-                "Fetch result: 10 entries, 0 cached, 1 failed from 2 feeds\n",
-            ]
-
-            def __init__(self, *args, **kwargs):
-                pass
-
-            def wait(self) -> int:
-                return 0
-
-        with mock.patch.object(serve.subprocess, "Popen", side_effect=_FakeProc):
-            _run_ins_job(Path("/tmp/entries.db"), Path("/tmp/config.toml"))
-
-        self.assertEqual(serve.INS_JOB["state"], "succeeded")
-        self.assertEqual(serve.INS_JOB["message"], "拉取完成，部分源失败")
-
 
 class ServeMutationEndpointTests(unittest.TestCase):
     def setUp(self) -> None:
