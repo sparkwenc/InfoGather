@@ -24,7 +24,3 @@ class InfoFilterTests(unittest.TestCase):
 
     def test_parse_updated_rejects_utc_normalization_overflow(self) -> None:
         self.assertIsNone(parse_updated("0001-01-01T00:00:00+14:00"))
-
-
-if __name__ == "__main__":
-    unittest.main()

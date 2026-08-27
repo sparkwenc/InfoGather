@@ -1,20 +1,10 @@
-.*
-!.gitignore
-
-# builds 
+.DS_Store
+.envrc
+.venv/
 __pycache__/
 *.egg-info/
-
-# data
+conf/config.toml
 data/
-
-# tests
-test/*
-!test/*.py
-
-# output
+dist/
 output/
-
-# config
-conf/*
-!conf/example.toml
+test/*.json

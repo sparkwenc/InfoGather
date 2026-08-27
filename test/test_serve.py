@@ -3,7 +3,6 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
-from typing import cast
 from unittest import mock
 
 from http import HTTPStatus
@@ -43,16 +42,7 @@ def _seed_entry(db_path: Path) -> None:
             )
 
 
-class HandlerHarness:
-    _source_key_from_payload = staticmethod(InfoHandler._source_key_from_payload)
-    _binary_value_from_payload = staticmethod(InfoHandler._binary_value_from_payload)
-    _revision_from_payload = staticmethod(InfoHandler._revision_from_payload)
-    _handle_entry_mutation = InfoHandler._handle_entry_mutation
-    _handle_entries = InfoHandler._handle_entries
-    _handle_favored = InfoHandler._handle_favored
-    _handle_remove_entry = InfoHandler._handle_remove_entry
-    _handle_restore_entry = InfoHandler._handle_restore_entry
-
+class HandlerHarness(InfoHandler):
     def __init__(self, db_path: Path, payload: dict | None) -> None:
         self._db_path = db_path
         self._conf_path = db_path.parent / "config.toml"
@@ -128,7 +118,6 @@ class ServeMutationEndpointTests(unittest.TestCase):
             response = harness.response
             self.assertIsNotNone(response)
             self.assertEqual(harness.status, HTTPStatus.OK)
-            response = cast(dict, response)
             self.assertTrue(response["ok"])
             self.assertEqual(response["updated"], 1)
             self.assertEqual(response["favored"], 1)
@@ -145,7 +134,7 @@ class ServeMutationEndpointTests(unittest.TestCase):
 
             harness._handle_entries("q=Example+abstract&limit=1")
 
-            response = cast(dict, harness.response)
+            response = harness.response
             self.assertEqual(harness.status, HTTPStatus.OK)
             self.assertEqual(response["total"], 1)
             self.assertEqual(len(response["items"]), 1)
@@ -182,7 +171,6 @@ class ServeMutationEndpointTests(unittest.TestCase):
             response = harness.response
             self.assertIsNotNone(response)
             self.assertEqual(harness.status, HTTPStatus.BAD_REQUEST)
-            response = cast(dict, response)
             self.assertIn("favored", response["error"])
 
     def test_favored_endpoint_rejects_fractional_flag(self) -> None:
@@ -244,7 +232,7 @@ class ServeMutationEndpointTests(unittest.TestCase):
                 payload={"srce_ty": "arXiv", "srce_id": "2601.00001"},
             )
             remove_harness._handle_remove_entry()
-            response = cast(dict, remove_harness.response)
+            response = remove_harness.response
             with InfoStorage(db_path) as storage:
                 self.assertIn(
                     "https://example.com/feed",

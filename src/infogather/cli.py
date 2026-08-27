@@ -3,11 +3,8 @@ import argparse
 
 from .sources import InfoSources
 from .storage import InfoStorage
-from .filters import InfoFilters
+from . import filters
 from .paths import DEFAULT_CONFIG_PATH, DEFAULT_DB_PATH, DEFAULT_OUTPUT_PATH
-
-DEFAULT_CONFIG = DEFAULT_CONFIG_PATH
-DEFAULT_OUTPUT = DEFAULT_OUTPUT_PATH
 
 
 def _cmd_ins(args: argparse.Namespace) -> int:
@@ -34,7 +31,7 @@ def _cmd_fav(args: argparse.Namespace) -> int:
 
 def _cmd_exp(args: argparse.Namespace) -> int:
     with InfoStorage(args.db_path) as storage:
-        fn = getattr(InfoFilters, args.filter, None)
+        fn = getattr(filters, args.filter, None)
         if fn is None or not callable(fn):
             raise ValueError(f"unknown filter function: {args.filter}")
         storage.export_entries(args.output, fn)
@@ -49,7 +46,7 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     p_ins = subparsers.add_parser("ins", help="fetch new entries")
-    p_ins.add_argument("-c", "--conf", default=DEFAULT_CONFIG,
+    p_ins.add_argument("-c", "--conf", default=DEFAULT_CONFIG_PATH,
                        help="configuration file path")
     p_ins.set_defaults(func=_cmd_ins)
 
@@ -62,7 +59,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_fav.set_defaults(func=_cmd_fav)
 
     p_exp = subparsers.add_parser("exp", help="export entries to markdown")
-    p_exp.add_argument("-o", "--output", default=DEFAULT_OUTPUT,
+    p_exp.add_argument("-o", "--output", default=DEFAULT_OUTPUT_PATH,
                        help="output markdown file")
     p_exp.add_argument("-f", "--filter", default="filter_ingestion",
                        help="filter function name")

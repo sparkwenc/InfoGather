@@ -468,7 +468,3 @@ class InfoStorageTests(unittest.TestCase):
                     )
 
             self.assertEqual(output.read_text(encoding="utf-8"), "previous")
-
-
-if __name__ == "__main__":
-    unittest.main()

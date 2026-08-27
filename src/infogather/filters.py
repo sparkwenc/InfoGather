@@ -5,7 +5,7 @@ def parse_updated(value: object) -> datetime | None:
     if not isinstance(value, str) or not value:
         return None
     try:
-        updated = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        updated = datetime.fromisoformat(value)
         if updated.tzinfo is None:
             updated = updated.replace(tzinfo=timezone.utc)
         return updated.astimezone(timezone.utc)
@@ -29,28 +29,26 @@ def updated_within(
     return timedelta(0) <= age <= window
 
 
-class InfoFilters:
-    @staticmethod
-    def filter_true(_: dict) -> bool:
-        """default filter: allow all entries"""
+def filter_true(_: dict) -> bool:
+    """default filter: allow all entries"""
 
-        return True
+    return True
 
-    @staticmethod
-    def filter_one_day(entry: dict) -> bool:
-        """one day filter: entries updated in the last day"""
 
-        return updated_within(entry.get("updated"), timedelta(days=1))
+def filter_one_day(entry: dict) -> bool:
+    """one day filter: entries updated in the last day"""
 
-    @staticmethod
-    def filter_favored(entry: dict) -> bool:
-        """favored filter: favored entries, regardless of recency"""
+    return updated_within(entry.get("updated"), timedelta(days=1))
 
-        return bool(entry["favored"])
 
-    @staticmethod
-    def filter_ingestion(entry: dict) -> bool:
-        """ingestion filter: must be within one day, new or favored updated"""
+def filter_favored(entry: dict) -> bool:
+    """favored filter: favored entries, regardless of recency"""
 
-        new_or_fav = entry["version"] == 1 or entry["favored"] == 1
-        return InfoFilters.filter_one_day(entry) and new_or_fav
+    return bool(entry["favored"])
+
+
+def filter_ingestion(entry: dict) -> bool:
+    """ingestion filter: must be within one day, new or favored updated"""
+
+    new_or_fav = entry["version"] == 1 or entry["favored"] == 1
+    return filter_one_day(entry) and new_or_fav

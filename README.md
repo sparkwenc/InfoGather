@@ -5,7 +5,6 @@
 ## 使用
 
 ```bash
-uv sync
 cp conf/example.toml conf/config.toml  # 可选：创建自定义订阅配置
 uv run inf ins
 uv run infserve
