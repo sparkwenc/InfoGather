@@ -90,6 +90,7 @@
 
 html {
   scroll-behavior: smooth;
+  scrollbar-gutter: stable;
 }
 
 body {
@@ -765,8 +766,7 @@ input {
   box-shadow: var(--shadow-sm);
   transition:
     border-color 0.16s ease,
-    box-shadow 0.16s ease,
-    transform 0.16s ease;
+    box-shadow 0.16s ease;
 }
 
 .card::before {
@@ -783,7 +783,6 @@ input {
 .card:hover {
   border-color: var(--line-strong);
   box-shadow: var(--shadow-md);
-  transform: translateY(-2px);
 }
 
 .card:hover::before {
