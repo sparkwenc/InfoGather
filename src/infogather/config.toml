@@ -1,0 +1,87 @@
+[[arXiv]]
+name = "Algebraic Geometry"
+url = "https://rss.arxiv.org/rss/math.AG"
+
+[[arXiv]]
+name = "Number Theory"
+url = "https://rss.arxiv.org/rss/math.NT"
+
+[[arXiv]]
+name = "Differential Geometry"
+url = "https://rss.arxiv.org/rss/math.DG"
+
+[[arXiv]]
+name = "Representation Theory"
+url = "https://rss.arxiv.org/rss/math.RT"
+
+[[arXiv]]
+name = "Symplectic Geometry"
+url = "https://rss.arxiv.org/rss/math.SG"
+
+[[arXiv]]
+name = "Commutative Algebra"
+url = "https://rss.arxiv.org/rss/math.AC"
+
+[[arXiv]]
+name = "Mathematical Physics"
+url = "https://rss.arxiv.org/rss/math.MP"
+
+[[arXiv]]
+name = "Algebraic Topology"
+url = "https://rss.arxiv.org/rss/math.AT"
+
+[[arXiv]]
+name = "K-theory"
+url = "https://rss.arxiv.org/rss/math.KT"
+
+[[arXiv]]
+name = "Geometric Topology"
+url = "https://rss.arxiv.org/rss/math.GT"
+
+[[arXiv]]
+name = "Complex Variables"
+url = "https://rss.arxiv.org/rss/math.CV"
+
+[[arXiv]]
+name = "Dynamical Systems"
+url = "https://rss.arxiv.org/rss/math.DS"
+
+[[arXiv]]
+name = "Group Theory"
+url = "https://rss.arxiv.org/rss/math.GR"
+
+[[arXiv]]
+name = "Combinatorics"
+url = "https://rss.arxiv.org/rss/math.CO"
+
+[[arXiv]]
+name = "ODE"
+url = "https://rss.arxiv.org/rss/math.CA"
+
+[[arXiv]]
+name = "PDE"
+url = "https://rss.arxiv.org/rss/math.AP"
+
+[[arXiv]]
+name = "Statistics"
+url = "https://rss.arxiv.org/rss/math.ST"
+
+[[Journals]]
+key = "annals"
+name = "Annals of Mathematics"
+url = "https://api.crossref.org/journals/0003-486X/works?filter=type:journal-article&sort=published&order=desc&rows=50&select=DOI,title,author,published,URL,abstract,resource"
+
+[[Journals]]
+key = "jams"
+name = "Journal of the American Mathematical Society"
+url = "https://api.crossref.org/journals/0894-0347/works?filter=type:journal-article&sort=published&order=desc&rows=50&select=DOI,title,author,published,URL,abstract,resource"
+
+[[Journals]]
+key = "inventiones"
+name = "Inventiones mathematicae"
+url = "https://api.crossref.org/journals/0020-9910/works?filter=type:journal-article&sort=published&order=desc&rows=50&select=DOI,title,author,published,URL,abstract,resource"
+
+[[Journals]]
+key = "acta"
+name = "Acta Mathematica"
+url = "https://api.crossref.org/journals/0001-5962/works?filter=type:journal-article&sort=published&order=desc&rows=50&select=DOI,title,author,published,URL,abstract,resource"

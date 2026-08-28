@@ -1,10 +1,7 @@
-.DS_Store
-.envrc
-.venv/
+.*
+!.gitignore
+
 __pycache__/
 *.egg-info/
-conf/config.toml
 data/
 dist/
-output/
-test/*.json

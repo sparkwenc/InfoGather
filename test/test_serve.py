@@ -425,7 +425,9 @@ class ServeMutationEndpointTests(unittest.TestCase):
             db_path = Path(td) / "entries.db"
             _seed_entry(db_path)
             with InfoStorage(db_path) as storage:
-                storage.favor_entry("arXiv", "2601.00001", 1)
+                storage.favor_entry_if_current(
+                    "arXiv", "2601.00001", 0, 0, 1
+                )
             harness = HandlerHarness(
                 db_path=db_path,
                 payload={
@@ -447,9 +449,10 @@ class ServeMutationEndpointTests(unittest.TestCase):
             _seed_entry(db_path)
             with InfoStorage(db_path) as storage:
                 newer = storage.query_entries()["items"][0]
-                storage.update_feed_states(
-                    {"https://example.com/feed": {"next_fetch_at": 999}}
-                )
+                with redirect_stdout(io.StringIO()):
+                    storage.insert_entries([], {
+                        "https://example.com/feed": {"next_fetch_at": 999}
+                    })
                 newer["version"] = 2
                 newer["updated"] = "2026-03-02T00:00:00+00:00"
                 newer["content"]["titl"] = "Newer title"

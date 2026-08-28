@@ -5,16 +5,16 @@ build-backend = "uv_build"
 [project]
 name = "infogather"
 version = "0.1.0"
-description = "CLI tool for information gathering and management"
+description = "Local web app for tracking research papers"
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.13"
 dependencies = [
     "feedparser",
 ]
 
 [project.scripts]
-inf = "infogather.cli:main"
-infserve = "infogather.serve:main"
+info = "infogather.serve:main"
 
 [tool.uv.build-backend]
 source-exclude = ["**/.DS_Store"]

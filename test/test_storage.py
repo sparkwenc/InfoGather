@@ -458,7 +458,9 @@ class InfoStorageTests(unittest.TestCase):
             with InfoStorage(str(db_path)) as storage:
                 with redirect_stdout(io.StringIO()):
                     storage.insert_entries([_entry(version=2, title="version 2")])
-                storage.favor_entry("arXiv", "2601.00001", 1)
+                storage.favor_entry_if_current(
+                    "arXiv", "2601.00001", 0, 0, 1
+                )
                 storage.notice_entry_if_current("arXiv", "2601.00001", 0, 1, 1)
 
                 with redirect_stdout(io.StringIO()):
@@ -560,10 +562,12 @@ class InfoStorageTests(unittest.TestCase):
                 storage.insert_entries([invalid_json])
             with self.assertRaisesRegex(ValueError, "limit"):
                 storage.query_entries(limit=0)
-            with self.assertRaisesRegex(ValueError, "favored"):
-                storage.favor_entry("arXiv", "2601.00001", 2)
+            with self.assertRaisesRegex(ValueError, "flags"):
+                storage.favor_entry_if_current(
+                    "arXiv", "2601.00001", 0, 0, 2
+                )
             with self.assertRaisesRegex(ValueError, "supported range"):
-                storage.update_feed_states({
+                storage.insert_entries([], {
                     "https://example.com/feed": {"next_fetch_at": float("inf")}
                 })
 
@@ -639,7 +643,6 @@ class InfoStorageTests(unittest.TestCase):
         with InfoStorage(":memory:") as storage:
             with redirect_stdout(io.StringIO()):
                 storage.insert_entries([_entry(version=1)])
-            self.assertEqual(storage.favor_entry("arXiv", "2601.00001", 0), 0)
             self.assertEqual(
                 storage.favor_entry_if_current(
                     "arXiv", "2601.00001", 0, 0, 0
@@ -743,15 +746,14 @@ class InfoStorageTests(unittest.TestCase):
 
     def test_feed_states_round_trip(self) -> None:
         with InfoStorage(":memory:") as storage:
-            storage.update_feed_states(
-                {
+            with redirect_stdout(io.StringIO()):
+                storage.insert_entries([], {
                     "https://example.com/feed": {
                         "etag": "abc",
                         "last_modified": "yesterday",
                         "next_fetch_at": 123.5,
                     }
-                }
-            )
+                })
 
             states = storage.get_feed_states()
 
@@ -838,27 +840,3 @@ class InfoStorageTests(unittest.TestCase):
             with _connect(db_path) as conn:
                 count = conn.execute("SELECT COUNT(*) FROM tab_entries").fetchone()[0]
             self.assertEqual(count, 1)
-
-    def test_export_creates_output_parent(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            output = Path(td) / "nested" / "feeds.md"
-            with InfoStorage(":memory:") as storage:
-                storage.export_entries(str(output), lambda _: True)
-            self.assertTrue(output.is_file())
-
-    def test_export_replaces_existing_file_only_after_success(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            output = Path(td) / "feeds.md"
-            output.write_text("previous", encoding="utf-8")
-            with InfoStorage(":memory:") as storage:
-                with redirect_stdout(io.StringIO()):
-                    storage.insert_entries([_entry(version=1)])
-                with self.assertRaisesRegex(RuntimeError, "filter failed"):
-                    storage.export_entries(
-                        output,
-                        lambda _: (_ for _ in ()).throw(
-                            RuntimeError("filter failed")
-                        ),
-                    )
-
-            self.assertEqual(output.read_text(encoding="utf-8"), "previous")

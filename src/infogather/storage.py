@@ -1,9 +1,7 @@
 import json
 import math
 import sqlite3
-import tempfile
 from pathlib import Path
-from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
 from .filters import parse_updated
@@ -129,26 +127,6 @@ class InfoStorage:
             for row in rows
         }
 
-    def update_feed_states(self, states: dict[str, dict]) -> None:
-        if not states:
-            return
-        with self._get_conn() as conn:
-            self._update_feed_states(states)
-
-    def favor_entry(self, srce_ty: str, srce_id: str, favored: int) -> int:
-        """Update favored status for one entry"""
-
-        if type(favored) is not int or favored not in (0, 1):
-            raise ValueError("favored must be 0 or 1")
-        with self._get_conn() as conn:
-            cur = conn.execute(
-                "UPDATE tab_entries SET favored = ?, state_rev = state_rev + 1 "
-                "WHERE srce_ty = ? AND srce_id = ? AND favored <> ? "
-                "AND state_rev < ?",
-                (favored, srce_ty, srce_id, favored, SQLITE_INT_MAX),
-            )
-        return cur.rowcount
-
     def favor_entry_if_current(
         self,
         srce_ty: str,
@@ -220,55 +198,6 @@ class InfoStorage:
             state_rev,
             prepared["updated"],
             prepared["content"],
-        )
-
-    def export_entries(
-        self,
-        filename: str | Path,
-        entry_filter: Callable[[dict], bool],
-    ) -> None:
-        """export all entries passing the filter to a markdown file"""
-
-        path = Path(filename).expanduser()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        total = 0
-        exported = 0
-        cursor = self._get_conn().execute(
-            """
-            SELECT srce_ty, srce_id, version, favored, noticed,
-                   state_rev, updated, content
-            FROM tab_entries
-            ORDER BY srce_ty, srce_id
-            """
-        )
-        temporary_path = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=path.parent,
-                prefix=f".{path.name}.",
-                suffix=".tmp",
-                delete=False,
-            ) as output:
-                temporary_path = Path(output.name)
-                while rows := cursor.fetchmany(1000):
-                    for row in rows:
-                        total += 1
-                        entry = self._row_to_entry(row)
-                        if not entry_filter(entry):
-                            continue
-                        exported += 1
-                        self._write_markdown_entry(output, entry)
-            temporary_path.replace(path)
-        except Exception:
-            if temporary_path is not None:
-                temporary_path.unlink(missing_ok=True)
-            raise
-
-        print(
-            f"Export result: {exported}/{total} to {filename} "
-            f"with {entry_filter.__name__}"
         )
 
     def query_entries(
@@ -1106,14 +1035,3 @@ class InfoStorage:
             "updated": row["updated"],
             "content": json.loads(row["content"]),
         }
-
-    @staticmethod
-    def _write_markdown_entry(output, entry: dict) -> None:
-        output.write(f"## {entry['srce_ty']}:{entry['srce_id']}\n\n")
-        output.write(f"- **Version:** {entry['version']}\n")
-        output.write(f"- **Favored:** {bool(entry['favored'])}\n")
-        output.write(f"- **Noticed:** {bool(entry.get('noticed', 0))}\n")
-        output.write(f"- **Updated:** {entry['updated']}\n\n")
-        output.write("- **Content**\n")
-        for key, value in entry["content"].items():
-            output.write(f"  - **{key}:** {value}\n")
