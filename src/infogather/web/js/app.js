@@ -43,6 +43,7 @@ const insPanel = document.getElementById("ins-panel");
 const insText = document.getElementById("ins-text");
 const insPercent = document.getElementById("ins-percent");
 const insProgress = document.getElementById("ins-progress");
+const insLog = document.getElementById("ins-log");
 
 const treeRootEl = document.getElementById("tree-root");
 const treeListEl = document.getElementById("tree-list");
@@ -56,7 +57,9 @@ const versionBtn = document.getElementById("version-btn");
 const versionNotBtn = document.getElementById("version-not-btn");
 const resultsHeading = document.getElementById("results-heading");
 
-const insElements = { insPanel, insBtn, insText, insPercent, insProgress };
+const insElements = {
+  insPanel, insBtn, insText, insPercent, insProgress, insLog
+};
 
 function renderUndo() {
   undoBtn.textContent = state.lastUndo?.label || "撤销上一步";

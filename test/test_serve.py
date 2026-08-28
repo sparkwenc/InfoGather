@@ -103,21 +103,31 @@ class ServeInsTests(unittest.TestCase):
             serve.INS_JOB["message"] = "test"
             serve.INS_JOB["started_at"] = None
             serve.INS_JOB["ended_at"] = None
+            serve.INS_JOB["logs"] = []
 
     def test_run_ins_job_passes_database_and_config_paths(self) -> None:
         result = IngestionResult(2, 0, 1, 3, 2)
-        with mock.patch.object(
-            serve, "run_ingestion", return_value=result
-        ) as ingestion:
+        def ingest(db_path, conf_path, *, progress):
+            progress(50, "Annals of Mathematics: 拉取 50 条")
+            return result
+
+        with mock.patch.object(serve, "run_ingestion", side_effect=ingest) as ingestion:
             db_path = Path("/tmp/custom-entries.db")
             conf_path = Path("/tmp/custom-config.toml")
             _run_ins_job(db_path, conf_path)
 
-        ingestion.assert_called_once_with(db_path, conf_path)
+        self.assertEqual(ingestion.call_args.args, (db_path, conf_path))
         self.assertEqual(serve.INS_JOB["state"], "succeeded")
         self.assertEqual(
             serve.INS_JOB["message"],
             "拉取完成: 2/3 条更新，1 个源失败",
+        )
+        self.assertEqual(
+            serve.INS_JOB["logs"],
+            [
+                "Annals of Mathematics: 拉取 50 条",
+                "拉取完成: 2/3 条更新，1 个源失败",
+            ],
         )
 
     def test_ins_run_can_return_an_already_completed_job(self) -> None:
@@ -136,7 +146,11 @@ class ServeInsTests(unittest.TestCase):
             harness = HandlerHarness(Path(td) / "entries.db", {})
             with (
                 mock.patch.object(serve.threading, "Thread", ImmediateThread),
-                mock.patch.object(serve, "run_ingestion", return_value=result),
+                mock.patch.object(
+                    serve,
+                    "run_ingestion",
+                    side_effect=lambda *_args, **_kwargs: result,
+                ),
             ):
                 harness._handle_ins_run()
 
@@ -251,7 +265,6 @@ class ServeInsTests(unittest.TestCase):
                 url = "https://rss.arxiv.org/rss/math.AG"
 
                 [[Journals]]
-                key = "annals"
                 name = "Annals of Mathematics"
                 url = "https://annals.math.princeton.edu/feed"
             """)

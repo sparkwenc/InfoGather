@@ -30,6 +30,7 @@ INS_JOB = {
     "message": "就绪",
     "started_at": None,
     "ended_at": None,
+    "logs": [],
 }
 REMOVE_UNDO_LOCK = threading.Lock()
 REMOVE_UNDO = {"token": None, "entry": None}
@@ -151,7 +152,9 @@ def _utcnow_iso() -> str:
 
 
 def _ins_snapshot_unlocked() -> dict:
-    return dict(INS_JOB)
+    snapshot = dict(INS_JOB)
+    snapshot["logs"] = list(INS_JOB["logs"])
+    return snapshot
 
 
 def _ins_snapshot() -> dict:
@@ -164,6 +167,14 @@ def _ins_update(**kwargs: object) -> None:
         INS_JOB.update(kwargs)
 
 
+def _ins_report(progress: int, message: str) -> None:
+    with INS_LOCK:
+        INS_JOB["progress"] = max(int(INS_JOB["progress"]), progress)
+        INS_JOB["message"] = message
+        INS_JOB["logs"].append(message)
+        INS_JOB["logs"] = INS_JOB["logs"][-120:]
+
+
 def _clear_removed_entry() -> None:
     with REMOVE_UNDO_LOCK:
         REMOVE_UNDO["token"] = None
@@ -172,26 +183,25 @@ def _clear_removed_entry() -> None:
 
 def _run_ins_job(db_path: str | Path, conf_path: Path) -> None:
     try:
-        _ins_update(progress=10, message="正在拉取")
-        result = run_ingestion(db_path, conf_path)
+        result = run_ingestion(db_path, conf_path, progress=_ins_report)
         failed_suffix = (
             f"，{result.failed_feeds} 个源失败"
             if result.failed_feeds else ""
         )
+        message = (
+            f"拉取完成: {result.changed_entries}/"
+            f"{result.normalized_entries} 条更新{failed_suffix}"
+        )
+        _ins_report(100, message)
         _ins_update(
             state="succeeded",
-            progress=100,
-            message=(
-                f"拉取完成: {result.changed_entries}/"
-                f"{result.normalized_entries} 条更新{failed_suffix}"
-            ),
             ended_at=_utcnow_iso(),
         )
     except Exception as exc:
+        message = f"拉取失败: {exc}"
+        _ins_report(max(int(_ins_snapshot()["progress"]), 1), message)
         _ins_update(
             state="failed",
-            progress=max(int(_ins_snapshot()["progress"]), 1),
-            message=f"拉取失败: {exc}",
             ended_at=_utcnow_iso(),
         )
 
@@ -799,6 +809,7 @@ class InfoHandler(SimpleHTTPRequestHandler):
             INS_JOB["message"] = "启动中"
             INS_JOB["started_at"] = _utcnow_iso()
             INS_JOB["ended_at"] = None
+            INS_JOB["logs"] = []
 
         worker = threading.Thread(
             target=_run_ins_job,

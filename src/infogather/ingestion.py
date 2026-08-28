@@ -4,6 +4,7 @@ import tomllib
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 from urllib.parse import parse_qsl, unquote, urlencode, urlparse
 
 from .sources import InfoSources
@@ -62,13 +63,21 @@ def _ingestion_lock(db_path: str | Path):
 def run_ingestion(
     db_path: str | Path,
     config_path: str | Path,
+    *,
+    progress: Callable[[int, str], None] | None = None,
 ) -> IngestionResult:
     config = load_config(config_path)
+    if progress is not None:
+        progress(2, "已读取配置")
     with InfoStorage(db_path) as storage:
         with _ingestion_lock(db_path):
             sources = InfoSources(config, feed_states=storage.get_feed_states())
-            entries = sources.get_normalized_feeds()
+            entries = sources.get_normalized_feeds(progress)
+            if progress is not None:
+                progress(90, "正在写入数据库")
             changed = storage.insert_entries(entries, sources.feed_state_updates)
+            if progress is not None:
+                progress(98, f"数据库写入: {changed}/{len(entries)} 条更新")
     return IngestionResult(
         total_feeds=sources.total_feeds,
         cached_feeds=sources.cached_feeds,

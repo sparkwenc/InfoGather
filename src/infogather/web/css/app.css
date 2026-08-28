@@ -330,6 +330,15 @@ input {
   accent-color: var(--danger);
 }
 
+.ins-log {
+  max-height: 150px;
+  margin: 8px 0 0;
+  overflow: auto;
+  color: var(--muted);
+  font: 10px/1.55 var(--font-mono);
+  white-space: pre-wrap;
+}
+
 /* ---------- source tree ---------- */
 
 .tree-root {
@@ -338,13 +347,6 @@ input {
   font-size: 12px;
   font-weight: 650;
   line-height: 1.5;
-}
-
-.source-help {
-  margin: 0 6px 12px;
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.55;
 }
 
 .tree-list,
@@ -357,7 +359,6 @@ input {
 .tree-list {
   min-height: 0;
   overflow: auto;
-  overscroll-behavior: contain;
 }
 
 .tree-item {

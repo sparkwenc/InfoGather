@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from html import unescape
 from html.parser import HTMLParser
+from typing import Callable
 from urllib.error import HTTPError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -16,6 +17,22 @@ from .filters import parse_updated
 
 MAX_FEED_BYTES = 8 * 1024 * 1024
 MAX_SOURCE_SELECTOR_LENGTH = 256
+# Preserve IDs created before these built-in keys were removed from config.
+_BUILTIN_JOURNAL_KEYS = {
+    "Annals of Mathematics": "annals",
+    "Journal of the American Mathematical Society": "jams",
+    "Inventiones mathematicae": "inventiones",
+    "Acta Mathematica": "acta",
+}
+
+
+def _report(
+    progress: Callable[[int, str], None] | None,
+    percent: int,
+    message: str,
+) -> None:
+    if progress is not None:
+        progress(percent, message)
 
 
 class _TextExtractor(HTMLParser):
@@ -75,7 +92,8 @@ def configured_sources(conf: dict) -> list[dict]:
             key = (
                 _extract_arxiv_tag(url)
                 if srce_ty == "arXiv"
-                else str(item.get("key", "")).strip() or name
+                else str(item.get("key", "")).strip()
+                or _BUILTIN_JOURNAL_KEYS.get(name, name)
             )
             if not key:
                 raise ValueError(f"source {name!r} has no key")
@@ -112,12 +130,16 @@ class InfoSources:
         self.cached_feeds = 0
         self.failed_feeds = 0
 
-    def get_normalized_feeds(self) -> list:
+    def get_normalized_feeds(
+        self,
+        progress: Callable[[int, str], None] | None = None,
+    ) -> list:
         """return normalized entries from all sources"""
         self.feed_state_updates = {}
-        raw_feeds, state_updates = self._fetch_raw_feeds()
+        raw_feeds, state_updates = self._fetch_raw_feeds(progress)
 
         print("Normalizing feeds...")
+        _report(progress, 70, "正在归一化")
         arxiv = self._normalized_arXiv([
             item["feed"] for item in raw_feeds
             if item["source"]["srce_ty"] == "arXiv"
@@ -128,6 +150,11 @@ class InfoSources:
         ])
         print(f"arXiv: {len(arxiv):3d} normalized")
         print(f"Journals: {len(journals):3d} normalized")
+        _report(
+            progress,
+            85,
+            f"归一化完成: arXiv {len(arxiv)} 条，期刊 {len(journals)} 条",
+        )
         normalized = [*arxiv, *journals]
         deduplicated = self._deduplicate_entries(normalized)
         duplicate_count = len(normalized) - len(deduplicated)
@@ -138,7 +165,10 @@ class InfoSources:
         return deduplicated
 
     # internal methods
-    def _fetch_raw_feeds(self) -> tuple[list, dict[str, dict]]:
+    def _fetch_raw_feeds(
+        self,
+        progress: Callable[[int, str], None] | None = None,
+    ) -> tuple[list, dict[str, dict]]:
         """fetch all feeds according to the configuration"""
 
         feeds: dict[int, dict] = {}
@@ -147,6 +177,7 @@ class InfoSources:
 
         total = len(requests)
         self.total_feeds = total
+        _report(progress, 5, f"准备拉取 {total} 个源")
         print(
             f"Fetching {total} feeds with up to "
             f"{min(self._max_workers, max(total, 1))} concurrent requests..."
@@ -160,6 +191,11 @@ class InfoSources:
         cached = 0
         failed = 0
         total_entries = 0
+
+        def report_source(message: str) -> None:
+            percent = 10 + int((completed / max(total, 1)) * 55)
+            _report(progress, percent, message)
+
         for index, source in enumerate(requests):
             name = source["name"]
             url = source["url"]
@@ -168,6 +204,7 @@ class InfoSources:
                 completed += 1
                 cached += 1
                 print(f"SOURCE {completed}/{total}: cached {name}")
+                report_source(f"{name}: 使用缓存")
                 continue
             pending.append((index, source, state))
 
@@ -194,14 +231,17 @@ class InfoSources:
                     if feed is None:
                         cached += 1
                         print(f"SOURCE {completed}/{total}: not modified {name}")
+                        report_source(f"{name}: 无更新")
                         continue
                     count = len(feed.get("entries", []))
                     feeds[index] = {"source": source, "feed": feed}
                     total_entries += count
                     print(f"SOURCE {completed}/{total}: {count:3d} from {name}")
+                    report_source(f"{name}: 拉取 {count} 条")
                 except Exception as exc:
                     failed += 1
                     print(f"SOURCE {completed}/{total}: failed {name}: {exc}")
+                    report_source(f"{name}: 失败 ({exc})")
 
         print(
             f"Fetch result: {total_entries} entries, {cached} cached, "

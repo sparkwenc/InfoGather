@@ -44,7 +44,7 @@ let cardSequence = 0;
   }
 
   function renderInsJob(elements, job) {
-    const { insPanel, insBtn, insPercent, insProgress, insText } = elements;
+    const { insPanel, insBtn, insPercent, insProgress, insText, insLog } = elements;
     const insBtnLabel = insBtn.querySelector("#ins-btn-label");
 
     if (!job || (job.state === "idle" && !job.started_at)) {
@@ -65,6 +65,10 @@ let cardSequence = 0;
     if (job.state === "succeeded") prefix = "已完成";
     if (job.state === "failed") prefix = "失败";
     insText.textContent = `${prefix}: ${job.message || ""}`;
+    const logs = Array.isArray(job.logs) ? job.logs : [];
+    insLog.textContent = logs.join("\n");
+    insLog.hidden = logs.length === 0;
+    if (logs.length) insLog.scrollTop = insLog.scrollHeight;
 
     const running = job.state === "running";
     insBtn.disabled = running;

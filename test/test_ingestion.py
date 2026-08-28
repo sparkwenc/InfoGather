@@ -60,7 +60,9 @@ class IngestionTests(unittest.TestCase):
                 self.config = config
                 self.feed_states = feed_states
 
-            def get_normalized_feeds(self):
+            def get_normalized_feeds(self, progress=None):
+                if progress is not None:
+                    progress(50, "test source: 拉取 1 条")
                 return [{
                     "srce_ty": "arXiv",
                     "srce_id": "2601.00001",
@@ -80,7 +82,14 @@ class IngestionTests(unittest.TestCase):
                 mock.patch("infogather.ingestion.InfoSources", FakeSources),
                 redirect_stdout(io.StringIO()),
             ):
-                result = run_ingestion(db_path, config_path)
+                progress = []
+                result = run_ingestion(
+                    db_path,
+                    config_path,
+                    progress=lambda percent, message: progress.append(
+                        (percent, message)
+                    ),
+                )
 
             with InfoStorage.open_current(db_path) as storage:
                 entries = storage.query_entries()["items"]
@@ -92,6 +101,8 @@ class IngestionTests(unittest.TestCase):
         self.assertEqual(result.changed_entries, 1)
         self.assertEqual(entries[0]["srce_id"], "2601.00001")
         self.assertEqual(states["https://example.com/feed"]["etag"], "new")
+        self.assertIn((50, "test source: 拉取 1 条"), progress)
+        self.assertIn((98, "数据库写入: 1/1 条更新"), progress)
 
     def test_run_ingestion_serializes_runs_for_the_same_database(self) -> None:
         first_entered = threading.Event()
@@ -111,7 +122,7 @@ class IngestionTests(unittest.TestCase):
                     calls += 1
                     self.call = calls
 
-            def get_normalized_feeds(self):
+            def get_normalized_feeds(self, _progress=None):
                 if self.call == 1:
                     first_entered.set()
                     release_first.wait(2)
