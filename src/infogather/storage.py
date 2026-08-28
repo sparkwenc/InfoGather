@@ -4,6 +4,7 @@ import sqlite3
 import tempfile
 from pathlib import Path
 from typing import Callable
+from urllib.parse import parse_qs, urlparse
 
 from .filters import parse_updated
 
@@ -13,6 +14,7 @@ BUSY_TIMEOUT_MS = 10_000
 SQLITE_INT_MAX = 2 ** 63 - 1
 MAX_SOURCE_TYPE_LENGTH = 512
 MAX_SOURCE_ID_LENGTH = 4096
+MAX_FETCH_AT = 253_402_300_799
 
 
 class InfoStorage:
@@ -26,6 +28,10 @@ class InfoStorage:
         raw_path = str(db_path)
         is_uri = raw_path.startswith("file:")
         self._read_only = is_uri and "mode=ro" in raw_path
+        if is_uri and not _initialize:
+            mode = parse_qs(urlparse(raw_path).query).get("mode", [""])[0]
+            if mode not in {"ro", "rw"}:
+                raise ValueError("open_current SQLite URI requires mode=ro or mode=rw")
         if raw_path == ":memory:" or is_uri:
             resolved_path = raw_path
         elif _initialize:
@@ -59,6 +65,7 @@ class InfoStorage:
                     f"database schema version {schema_version} requires "
                     f"migration to version {SCHEMA_VERSION}"
                 )
+            self._validate_current_schema()
         except Exception:
             self.close()
             raise
@@ -127,7 +134,7 @@ class InfoStorage:
     def favor_entry(self, srce_ty: str, srce_id: str, favored: int) -> int:
         """Update favored status for one entry"""
 
-        if favored not in (0, 1):
+        if type(favored) is not int or favored not in (0, 1):
             raise ValueError("favored must be 0 or 1")
         with self._get_conn() as conn:
             cur = conn.execute(
@@ -184,6 +191,8 @@ class InfoStorage:
             ).fetchone()
             entry = None if row is None else self._row_to_entry(row)
             if entry is not None:
+                if entry["state_rev"] >= SQLITE_INT_MAX:
+                    raise OverflowError("entry state revision is exhausted")
                 conn.execute(
                     "DELETE FROM tab_entries WHERE srce_ty = ? AND srce_id = ?",
                     (srce_ty, srce_id),
@@ -195,8 +204,8 @@ class InfoStorage:
         """Restore a removed entry unless it has already been reinserted."""
 
         prepared = self._prepare_entry(entry)
-        state_rev = int(entry["state_rev"])
-        if not 0 <= state_rev <= SQLITE_INT_MAX:
+        state_rev = entry["state_rev"]
+        if type(state_rev) is not int or not 0 <= state_rev <= SQLITE_INT_MAX:
             raise ValueError("state revision is outside SQLite integer range")
         return self._restore_row(
             prepared["srce_ty"],
@@ -275,7 +284,7 @@ class InfoStorage:
     ) -> dict:
         """Return one stable, database-filtered page of entries."""
 
-        if not 1 <= limit <= 10_000:
+        if type(limit) is not int or not 1 <= limit <= 10_000:
             raise ValueError("limit must be between 1 and 10000")
         where, params = self._entry_filter_sql(
             favored=favored,
@@ -435,12 +444,22 @@ class InfoStorage:
         content = entry["content"]
         if not isinstance(content, dict):
             raise TypeError("entry content must be an object")
-        srce_ty = str(entry["srce_ty"]).strip()
-        srce_id = str(entry["srce_id"]).strip()
-        version = int(entry["version"])
-        favored = int(entry.get("favored", 0))
-        noticed = int(entry.get("noticed", 0))
-        updated = str(entry["updated"])
+        if not isinstance(entry["srce_ty"], str) or not isinstance(
+            entry["srce_id"], str
+        ):
+            raise TypeError("entry source type and ID must be strings")
+        srce_ty = entry["srce_ty"].strip()
+        srce_id = entry["srce_id"].strip()
+        version = entry["version"]
+        favored = entry.get("favored", 0)
+        noticed = entry.get("noticed", 0)
+        updated = entry["updated"]
+        if type(version) is not int:
+            raise TypeError("entry version must be an integer")
+        if type(favored) is not int or type(noticed) is not int:
+            raise TypeError("entry flags must be integers")
+        if not isinstance(updated, str):
+            raise TypeError("entry updated timestamp must be a string")
         updated_at_us = cls._updated_at_us(updated)
         if not srce_ty or not srce_id:
             raise ValueError("entry source type and ID are required")
@@ -480,16 +499,29 @@ class InfoStorage:
             return
         values = []
         for url, state in states.items():
-            url = str(url).strip()
-            next_fetch_at = float(state.get("next_fetch_at", 0) or 0)
+            if not isinstance(url, str) or not isinstance(state, dict):
+                raise TypeError("feed state must map URL strings to objects")
+            url = url.strip()
+            raw_next_fetch_at = state.get("next_fetch_at", 0) or 0
+            if type(raw_next_fetch_at) not in (int, float):
+                raise TypeError("next fetch time must be numeric")
+            next_fetch_at = float(raw_next_fetch_at)
             if not url:
                 raise ValueError("feed URL is required")
-            if not math.isfinite(next_fetch_at) or next_fetch_at < 0:
-                raise ValueError("next fetch time must be finite and non-negative")
+            if not 0 <= next_fetch_at <= MAX_FETCH_AT or not math.isfinite(
+                next_fetch_at
+            ):
+                raise ValueError("next fetch time is outside the supported range")
+            etag = state.get("etag")
+            last_modified = state.get("last_modified")
+            if etag is not None and not isinstance(etag, str):
+                raise TypeError("feed ETag must be a string or null")
+            if last_modified is not None and not isinstance(last_modified, str):
+                raise TypeError("feed Last-Modified must be a string or null")
             values.append((
                 url,
-                state.get("etag"),
-                state.get("last_modified"),
+                etag,
+                last_modified,
                 next_fetch_at,
             ))
         self._get_conn().executemany(
@@ -528,6 +560,91 @@ class InfoStorage:
                 return
             self._install_canonical_schema()
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def _validate_current_schema(self) -> None:
+        conn = self._get_conn()
+        expected_entries = [
+            ("srce_ty", "TEXT", 1, None, 1),
+            ("srce_id", "TEXT", 1, None, 2),
+            ("version", "INTEGER", 1, "1", 0),
+            ("favored", "INTEGER", 1, "0", 0),
+            ("noticed", "INTEGER", 1, "0", 0),
+            ("state_rev", "INTEGER", 1, "0", 0),
+            ("updated", "TEXT", 1, None, 0),
+            ("updated_at_us", "INTEGER", 1, "0", 0),
+            ("content", "TEXT", 1, None, 0),
+        ]
+        expected_feed_state = [
+            ("url", "TEXT", 1, None, 1),
+            ("etag", "TEXT", 0, None, 0),
+            ("last_modified", "TEXT", 0, None, 0),
+            ("next_fetch_at", "REAL", 1, "0", 0),
+        ]
+
+        def columns(table: str) -> list[tuple[str, str, int, str | None, int]]:
+            return [
+                (
+                    row["name"], row["type"], row["notnull"],
+                    row["dflt_value"], row["pk"],
+                )
+                for row in conn.execute(f"PRAGMA table_info({table})")
+            ]
+
+        if columns("tab_entries") != expected_entries:
+            raise RuntimeError("database schema v5 has invalid tab_entries columns")
+        if columns("tab_feed_state") != expected_feed_state:
+            raise RuntimeError("database schema v5 has invalid tab_feed_state columns")
+
+        indexes = {
+            row["name"]: row
+            for row in conn.execute("PRAGMA index_list(tab_entries)")
+            if row["origin"] == "c"
+        }
+        if set(indexes) != {"idx_entries_page", "idx_entries_favored_page"}:
+            raise RuntimeError("database schema v5 has invalid tab_entries indexes")
+        for name in indexes:
+            indexed_columns = [
+                row["name"] for row in conn.execute(f"PRAGMA index_info({name})")
+            ]
+            if indexed_columns != ["updated_at_us", "srce_ty", "srce_id"]:
+                raise RuntimeError(f"database schema v5 has invalid index {name}")
+        if indexes["idx_entries_page"]["partial"] != 0 or indexes[
+            "idx_entries_favored_page"
+        ]["partial"] != 1:
+            raise RuntimeError("database schema v5 has invalid index predicates")
+        favored_index_sql = " ".join(
+            conn.execute(
+                "SELECT sql FROM sqlite_schema "
+                "WHERE name = 'idx_entries_favored_page'"
+            ).fetchone()[0].lower().split()
+        )
+        if not favored_index_sql.endswith("where favored = 1"):
+            raise RuntimeError("database schema v5 has invalid favored index")
+
+        schema_sql = " ".join(
+            conn.execute(
+                "SELECT sql FROM sqlite_schema WHERE name = 'tab_entries'"
+            ).fetchone()[0].lower().split()
+        )
+        required_checks = (
+            "check (typeof(version) = 'integer' and version between 1",
+            "check (typeof(favored) = 'integer' and favored in (0, 1))",
+            "check (typeof(noticed) = 'integer' and noticed in (0, 1))",
+            "check (typeof(state_rev) = 'integer' and state_rev between 0",
+            "check (json_valid(content) and json_type(content) = 'object')",
+        )
+        if any(check not in schema_sql for check in required_checks):
+            raise RuntimeError("database schema v5 has invalid tab_entries checks")
+        feed_sql = " ".join(
+            conn.execute(
+                "SELECT sql FROM sqlite_schema WHERE name = 'tab_feed_state'"
+            ).fetchone()[0].lower().split()
+        )
+        if (
+            "check (length(trim(url)) > 0)" not in feed_sql
+            or f"and next_fetch_at between 0 and {MAX_FETCH_AT}" not in feed_sql
+        ):
+            raise RuntimeError("database schema v5 has invalid tab_feed_state checks")
 
     def _install_canonical_schema(self) -> None:
         conn = self._get_conn()
@@ -633,10 +750,13 @@ class InfoStorage:
                 updated_at_us INTEGER NOT NULL DEFAULT 0,
                 content TEXT NOT NULL,
                 PRIMARY KEY (srce_ty, srce_id),
-                CHECK (version >= 1),
-                CHECK (favored IN (0, 1)),
-                CHECK (noticed IN (0, 1)),
-                CHECK (state_rev >= 0),
+                CHECK (length(srce_ty) BETWEEN 1 AND {MAX_SOURCE_TYPE_LENGTH}),
+                CHECK (length(srce_id) BETWEEN 1 AND {MAX_SOURCE_ID_LENGTH}),
+                CHECK (typeof(version) = 'integer' AND version BETWEEN 1 AND {SQLITE_INT_MAX}),
+                CHECK (typeof(favored) = 'integer' AND favored IN (0, 1)),
+                CHECK (typeof(noticed) = 'integer' AND noticed IN (0, 1)),
+                CHECK (typeof(state_rev) = 'integer' AND state_rev BETWEEN 0 AND {SQLITE_INT_MAX}),
+                CHECK (typeof(updated_at_us) = 'integer'),
                 CHECK (json_valid(content) AND json_type(content) = 'object')
             )
         """)
@@ -644,12 +764,16 @@ class InfoStorage:
     def _install_feed_state_table(self, tables: set[str]) -> None:
         conn = self._get_conn()
         if "tab_feed_state" not in tables:
-            conn.execute("""
+            conn.execute(f"""
                 CREATE TABLE tab_feed_state (
-                    url TEXT PRIMARY KEY,
+                    url TEXT PRIMARY KEY NOT NULL CHECK (length(trim(url)) > 0),
                     etag TEXT,
                     last_modified TEXT,
-                    next_fetch_at REAL NOT NULL DEFAULT 0
+                    next_fetch_at REAL NOT NULL DEFAULT 0,
+                    CHECK (
+                        typeof(next_fetch_at) IN ('integer', 'real')
+                        AND next_fetch_at BETWEEN 0 AND {MAX_FETCH_AT}
+                    )
                 )
             """)
             return
@@ -663,22 +787,38 @@ class InfoStorage:
         if "url" not in columns or primary_key != ["url"]:
             raise RuntimeError("tab_feed_state URL must be its primary key")
         conn.execute("DROP TABLE IF EXISTS tab_feed_state_v5")
-        conn.execute("""
+        conn.execute(f"""
             CREATE TABLE tab_feed_state_v5 (
-                url TEXT PRIMARY KEY,
+                url TEXT PRIMARY KEY NOT NULL CHECK (length(trim(url)) > 0),
                 etag TEXT,
                 last_modified TEXT,
-                next_fetch_at REAL NOT NULL DEFAULT 0
+                next_fetch_at REAL NOT NULL DEFAULT 0,
+                CHECK (
+                    typeof(next_fetch_at) IN ('integer', 'real')
+                    AND next_fetch_at BETWEEN 0 AND {MAX_FETCH_AT}
+                )
             )
         """)
-        etag = "etag" if "etag" in columns else "NULL"
-        modified = "last_modified" if "last_modified" in columns else "NULL"
+        etag = (
+            "CASE WHEN typeof(etag) = 'text' THEN etag END"
+            if "etag" in columns else "NULL"
+        )
+        modified = (
+            "CASE WHEN typeof(last_modified) = 'text' THEN last_modified END"
+            if "last_modified" in columns else "NULL"
+        )
         next_fetch = "next_fetch_at" if "next_fetch_at" in columns else "0"
         conn.execute(f"""
             INSERT INTO tab_feed_state_v5 (
                 url, etag, last_modified, next_fetch_at
             )
-            SELECT url, {etag}, {modified}, {next_fetch}
+            SELECT url, {etag}, {modified},
+                   CASE
+                       WHEN typeof({next_fetch}) IN ('integer', 'real')
+                            AND {next_fetch} BETWEEN 0 AND {MAX_FETCH_AT}
+                       THEN {next_fetch}
+                       ELSE 0
+                   END
             FROM tab_feed_state
         """)
         conn.execute("DROP TABLE tab_feed_state")
@@ -699,7 +839,7 @@ class InfoStorage:
         conn = self._get_conn()
         existing = conn.execute(
             """
-            SELECT version, updated, updated_at_us, content
+            SELECT version, state_rev, updated, updated_at_us, content
             FROM tab_entries
             WHERE srce_ty = ? AND srce_id = ?
             """,
@@ -731,6 +871,8 @@ class InfoStorage:
         incoming_tags = content.get("tags", []) or []
         merged_tags = list(dict.fromkeys([*existing_tags, *incoming_tags]))
         if version > stored_version:
+            if int(existing["state_rev"]) >= SQLITE_INT_MAX:
+                raise OverflowError("entry state revision is exhausted")
             merged_content = dict(content)
             merged_content["tags"] = merged_tags
             conn.execute(
@@ -877,9 +1019,16 @@ class InfoStorage:
     ) -> int:
         if column not in {"favored", "noticed"}:
             raise ValueError(f"unsupported flag column: {column}")
-        if expected not in (0, 1) or value not in (0, 1):
+        if (
+            type(expected) is not int
+            or type(value) is not int
+            or expected not in (0, 1)
+            or value not in (0, 1)
+        ):
             raise ValueError("entry flags must be 0 or 1")
-        if not 0 <= expected_revision <= SQLITE_INT_MAX:
+        if type(expected_revision) is not int or not (
+            0 <= expected_revision <= SQLITE_INT_MAX
+        ):
             raise ValueError("state revision is outside SQLite integer range")
         with self._get_conn() as conn:
             cur = conn.execute(

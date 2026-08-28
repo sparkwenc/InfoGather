@@ -115,7 +115,7 @@ class InfoStorageTests(unittest.TestCase):
                 }
             self.assertIn("idx_entries_page", indexes)
 
-    def test_current_schema_open_does_not_repair_or_create(self) -> None:
+    def test_current_schema_open_validates_without_repairing_or_creating(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "entries.db"
             with self.assertRaises(FileNotFoundError):
@@ -126,13 +126,22 @@ class InfoStorageTests(unittest.TestCase):
                 pass
             with _connect(db_path) as conn:
                 conn.execute("DROP INDEX idx_entries_page")
-            with InfoStorage(db_path):
-                pass
+            with self.assertRaisesRegex(RuntimeError, "indexes"):
+                InfoStorage(db_path)
             with _connect(db_path) as conn:
                 indexes = {
                     row[1] for row in conn.execute("PRAGMA index_list(tab_entries)")
                 }
             self.assertNotIn("idx_entries_page", indexes)
+
+    def test_current_schema_rejects_missing_tables(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "entries.db"
+            with _connect(db_path) as conn:
+                conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+            with self.assertRaisesRegex(RuntimeError, "tab_entries columns"):
+                InfoStorage(db_path)
 
     def test_future_schema_is_rejected_without_changes(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -445,10 +454,78 @@ class InfoStorageTests(unittest.TestCase):
                 storage.query_entries(limit=0)
             with self.assertRaisesRegex(ValueError, "favored"):
                 storage.favor_entry("arXiv", "2601.00001", 2)
-            with self.assertRaisesRegex(ValueError, "finite"):
+            with self.assertRaisesRegex(ValueError, "supported range"):
                 storage.update_feed_states({
                     "https://example.com/feed": {"next_fetch_at": float("inf")}
                 })
+
+    def test_storage_rejects_lossy_type_coercion(self) -> None:
+        invalid_values = [
+            {"version": 1.9},
+            {"favored": True},
+            {"srce_id": 260100001},
+            {"updated": 123},
+        ]
+        with InfoStorage(":memory:") as storage:
+            for replacement in invalid_values:
+                with self.subTest(replacement=replacement), self.assertRaises(
+                    TypeError
+                ):
+                    storage.insert_entries([{**_entry(version=1), **replacement}])
+
+    def test_migration_resets_invalid_feed_cache_time(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "entries.db"
+            with _connect(db_path) as conn:
+                conn.executescript(
+                    """
+                    CREATE TABLE tab_feed_state (
+                        url TEXT PRIMARY KEY,
+                        etag TEXT,
+                        last_modified TEXT,
+                        next_fetch_at REAL NOT NULL DEFAULT 0
+                    );
+                    PRAGMA user_version = 4;
+                    """
+                )
+                conn.execute(
+                    "INSERT INTO tab_feed_state VALUES (?, ?, ?, ?)",
+                    ("https://example.com/feed", "etag", None, float("inf")),
+                )
+
+            with InfoStorage(db_path) as storage:
+                state = storage.get_feed_states()["https://example.com/feed"]
+                self.assertEqual(state["next_fetch_at"], 0)
+                with self.assertRaises(sqlite3.IntegrityError):
+                    storage._get_conn().execute(
+                        "UPDATE tab_feed_state SET next_fetch_at = -1"
+                    )
+
+    def test_revision_exhaustion_rolls_back_ingestion_and_remove(self) -> None:
+        with InfoStorage(":memory:") as storage:
+            with redirect_stdout(io.StringIO()):
+                storage.insert_entries([_entry(version=1)])
+            storage._get_conn().execute(
+                "UPDATE tab_entries SET state_rev = ?",
+                (2 ** 63 - 1,),
+            )
+            storage._get_conn().commit()
+            with self.assertRaisesRegex(OverflowError, "exhausted"):
+                storage.insert_entries(
+                    [_entry(version=2)],
+                    {"https://example.com/feed": {"etag": "new"}},
+                )
+            self.assertEqual(storage.get_feed_states(), {})
+            with self.assertRaisesRegex(OverflowError, "exhausted"):
+                storage.pop_entry("arXiv", "2601.00001")
+            self.assertEqual(_items(storage)[0]["version"], 1)
+
+    def test_open_current_uri_cannot_create_database(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "missing.db"
+            with self.assertRaisesRegex(ValueError, "mode=ro or mode=rw"):
+                InfoStorage.open_current(f"{db_path.as_uri()}?mode=rwc")
+            self.assertFalse(db_path.exists())
 
     def test_noop_flag_update_does_not_increment_revision(self) -> None:
         with InfoStorage(":memory:") as storage:
