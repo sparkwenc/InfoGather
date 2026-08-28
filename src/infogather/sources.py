@@ -8,6 +8,8 @@ from urllib.error import HTTPError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+from .filters import parse_updated
+
 
 MAX_FEED_BYTES = 8 * 1024 * 1024
 
@@ -310,7 +312,14 @@ class InfoSources:
             existing_tags = existing["content"].get("tags", [])
             incoming_tags = entry["content"].get("tags", [])
             merged_tags = sorted(set([*existing_tags, *incoming_tags]))
-            if entry["version"] > existing["version"]:
+            incoming_updated = parse_updated(str(entry.get("updated", "")))
+            existing_updated = parse_updated(str(existing.get("updated", "")))
+            use_incoming = entry["version"] > existing["version"] or (
+                entry["version"] == existing["version"]
+                and incoming_updated is not None
+                and (existing_updated is None or incoming_updated > existing_updated)
+            )
+            if use_incoming:
                 entry["content"]["tags"] = merged_tags
                 unique[key] = entry
             else:

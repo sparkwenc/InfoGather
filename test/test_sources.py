@@ -225,6 +225,28 @@ class InfoSourcesTests(unittest.TestCase):
         self.assertIs(latest[0], newer)
         self.assertEqual(latest[0]["content"]["tags"], ["math.AG", "math.DG", "math.NT"])
 
+    def test_equal_version_deduplication_keeps_latest_timestamp(self) -> None:
+        older = {
+            "srce_ty": "arXiv",
+            "srce_id": "2601.00001",
+            "version": 1,
+            "updated": "2026-03-01T00:00:00+00:00",
+            "content": {"titl": "old", "tags": ["math.AG"]},
+        }
+        newer = {
+            "srce_ty": "arXiv",
+            "srce_id": "2601.00001",
+            "version": 1,
+            "updated": "2026-03-02T00:00:00+00:00",
+            "content": {"titl": "new", "tags": ["math.NT"]},
+        }
+
+        merged = InfoSources._deduplicate_entries([older, newer])
+
+        self.assertIs(merged[0], newer)
+        self.assertEqual(merged[0]["content"]["titl"], "new")
+        self.assertEqual(merged[0]["content"]["tags"], ["math.AG", "math.NT"])
+
     def test_no_cache_response_is_immediately_stale(self) -> None:
         before = time.time()
 

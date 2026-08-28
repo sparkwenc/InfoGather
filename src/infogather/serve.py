@@ -182,12 +182,16 @@ def _run_ins_job(db_path: str | Path, conf_path: Path) -> None:
     try:
         _ins_update(progress=10, message="正在拉取")
         result = run_ingestion(db_path, conf_path)
+        failed_suffix = (
+            f"，{result.failed_feeds} 个源失败"
+            if result.failed_feeds else ""
+        )
         _ins_update(
             state="succeeded",
             progress=100,
             message=(
                 f"拉取完成: {result.changed_entries}/"
-                f"{result.normalized_entries} 条更新"
+                f"{result.normalized_entries} 条更新{failed_suffix}"
             ),
             ended_at=_utcnow_iso(),
         )

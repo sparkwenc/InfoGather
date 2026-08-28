@@ -1,5 +1,6 @@
 import io
 import tempfile
+import threading
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -55,3 +56,63 @@ class IngestionTests(unittest.TestCase):
         self.assertEqual(result.changed_entries, 1)
         self.assertEqual(entries[0]["srce_id"], "2601.00001")
         self.assertEqual(states["https://example.com/feed"]["etag"], "new")
+
+    def test_run_ingestion_serializes_runs_for_the_same_database(self) -> None:
+        first_entered = threading.Event()
+        release_first = threading.Event()
+        second_entered = threading.Event()
+        calls_lock = threading.Lock()
+        calls = 0
+
+        class BlockingSources:
+            def __init__(self, _config, *, feed_states):
+                nonlocal calls
+                self.total_feeds = 0
+                self.cached_feeds = 0
+                self.failed_feeds = 0
+                self.feed_state_updates = {}
+                with calls_lock:
+                    calls += 1
+                    self.call = calls
+
+            def get_normalized_feeds(self):
+                if self.call == 1:
+                    first_entered.set()
+                    release_first.wait(2)
+                else:
+                    second_entered.set()
+                return []
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config_path = root / "config.toml"
+            db_path = root / "entries.db"
+            config_path.write_text("")
+            errors = []
+
+            def run():
+                try:
+                    run_ingestion(db_path, config_path)
+                except Exception as exc:
+                    errors.append(exc)
+
+            with (
+                mock.patch("infogather.ingestion.InfoSources", BlockingSources),
+                mock.patch("builtins.print"),
+            ):
+                first = threading.Thread(target=run)
+                second = threading.Thread(target=run)
+                first.start()
+                self.assertTrue(first_entered.wait(2))
+                second.start()
+                try:
+                    self.assertFalse(second_entered.wait(0.1))
+                finally:
+                    release_first.set()
+                    first.join(2)
+                    second.join(2)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertTrue(second_entered.is_set())
+        self.assertEqual(errors, [])

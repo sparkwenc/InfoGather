@@ -104,7 +104,7 @@ class ServeInsTests(unittest.TestCase):
             serve.INS_JOB["ended_at"] = None
 
     def test_run_ins_job_passes_database_and_config_paths(self) -> None:
-        result = IngestionResult(2, 1, 0, 3, 2)
+        result = IngestionResult(2, 0, 1, 3, 2)
         with mock.patch.object(
             serve, "run_ingestion", return_value=result
         ) as ingestion:
@@ -114,7 +114,10 @@ class ServeInsTests(unittest.TestCase):
 
         ingestion.assert_called_once_with(db_path, conf_path)
         self.assertEqual(serve.INS_JOB["state"], "succeeded")
-        self.assertEqual(serve.INS_JOB["message"], "拉取完成: 2/3 条更新")
+        self.assertEqual(
+            serve.INS_JOB["message"],
+            "拉取完成: 2/3 条更新，1 个源失败",
+        )
 
     def test_web_assets_are_packaged_with_server(self) -> None:
         self.assertTrue((serve.WEB_DIR / "index.html").is_file())
