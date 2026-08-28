@@ -10,9 +10,8 @@ const state = {
   hasMore: false,
   appliedQuery: "",
   loading: false,
-  pendingReset: false,
-  entriesGeneration: 0,
-  treeGeneration: 0,
+  entriesRequest: null,
+  refreshController: null,
   selectedSelectors: new Set(),
   favoredOnly: false,
   unnoticedOnly: false,
@@ -24,7 +23,7 @@ const state = {
   lastUndo: null,
   mutating: false,
   insPollTimer: null,
-  insStatusLoading: false,
+  insStatusPromise: null,
   insWasRunning: false
 };
 
@@ -87,13 +86,16 @@ function findRenderedEntry(item) {
 }
 
 function stopInsPolling() {
-  clearInterval(state.insPollTimer);
+  clearTimeout(state.insPollTimer);
   state.insPollTimer = null;
 }
 
-function startInsPolling() {
-  if (state.insPollTimer) return;
-  state.insPollTimer = setInterval(pollInsStatus, 900);
+function startInsPolling(delay = 900) {
+  if (state.insPollTimer || document.hidden) return;
+  state.insPollTimer = setTimeout(() => {
+    state.insPollTimer = null;
+    void pollInsStatus();
+  }, delay);
 }
 
 function renderTree() {
@@ -129,9 +131,12 @@ function buildFilterParams() {
 }
 
 async function refreshFilteredView() {
+  state.refreshController?.abort();
+  const controller = new AbortController();
+  state.refreshController = controller;
   await Promise.all([
-    loadTagTree(),
-    fetchEntries({ reset: true })
+    loadTagTree(controller.signal),
+    fetchEntries({ reset: true, signal: controller.signal })
   ]);
 }
 
@@ -173,10 +178,17 @@ function renderEntries(items, { reset }) {
 }
 
 async function pollInsStatus() {
-  if (state.insStatusLoading) return;
-  state.insStatusLoading = true;
+  if (document.hidden) return;
+  if (state.insStatusPromise) {
+    try {
+      await state.insStatusPromise;
+    } catch (err) {
+      console.error(err);
+    }
+    return;
+  }
 
-  try {
+  const request = (async () => {
     const payload = await api.getInsStatus();
     const job = payload.job || {};
 
@@ -184,32 +196,35 @@ async function pollInsStatus() {
     state.insWasRunning = job.state === "running";
     ui.renderInsJob(insElements, job);
 
-    if (job.state === "running") {
-      startInsPolling();
-    }
-
     if (wasRunning && job.state === "succeeded") {
       await refreshFilteredView();
     }
 
     if (job.state !== "running") {
+      state.insWasRunning = false;
       stopInsPolling();
     }
+  })();
+  state.insStatusPromise = request;
+  try {
+    await request;
   } catch (err) {
     console.error(err);
   } finally {
-    state.insStatusLoading = false;
+    if (state.insStatusPromise === request) state.insStatusPromise = null;
+    if (state.insWasRunning) startInsPolling();
   }
 }
 
 async function runIns() {
   insBtn.disabled = true;
   try {
+    if (state.insStatusPromise) await pollInsStatus();
     const payload = await api.runIns();
     const job = payload.job || {};
     ui.renderInsJob(insElements, job);
-    state.insWasRunning = true;
-    startInsPolling();
+    state.insWasRunning = job.state === "running";
+    stopInsPolling();
     await pollInsStatus();
   } catch (err) {
     insBtn.disabled = false;
@@ -332,51 +347,45 @@ async function undoLastAction() {
   }
 }
 
-async function loadTagTree() {
-  const generation = ++state.treeGeneration;
+async function loadTagTree(signal) {
   try {
     const params = buildFilterParams();
-    const payload = await api.getTagTree(params);
-    if (generation !== state.treeGeneration) return;
+    const payload = await api.getTagTree(params, signal);
+    if (signal.aborted) return;
     const root = payload.root || { name: "配置源", group_count: 0, source_count: 0, count: 0 };
     treeRootEl.textContent = `${root.name}（${root.group_count} 类 / ${root.source_count} 源 / ${root.count} 条）`;
-    state.total = Number(root.count || 0);
-    ui.setMeta(metaEl, state);
-    moreEl.hidden = !state.hasMore;
     state.treeGroups = Array.isArray(payload.groups) ? payload.groups : [];
     renderTree();
   } catch (err) {
-    if (generation !== state.treeGeneration) return;
+    if (signal.aborted) return;
     treeRootEl.textContent = "配置源 (加载失败)";
     treeListEl.innerHTML = '<li class="tree-item tree-empty">无法读取来源列表</li>';
     console.error(err);
   }
 }
 
-async function fetchEntries({ reset = false } = {}) {
-  if (reset) state.entriesGeneration += 1;
-  const generation = state.entriesGeneration;
-  if (state.loading) {
-    if (reset) state.pendingReset = true;
-    return;
-  }
+async function fetchEntries({ reset = false, signal } = {}) {
+  if (!reset && state.entriesRequest) return;
+  const request = {};
+  state.entriesRequest = request;
   state.loading = true;
   listEl.setAttribute("aria-busy", "true");
   moreEl.disabled = true;
 
   const params = buildFilterParams();
   params.set("limit", String(pageSize));
-  params.set("include_total", "0");
+  params.set("include_total", reset ? "1" : "0");
   if (!reset && state.cursor) params.set("cursor", state.cursor);
 
   try {
-    const payload = await api.getEntries(params);
-    if (generation !== state.entriesGeneration) return;
+    const payload = await api.getEntries(params, signal);
+    if (signal?.aborted || state.entriesRequest !== request) return;
     const items = Array.isArray(payload.items) ? payload.items : [];
 
     renderEntries(items, { reset });
     if (reset) {
       state.offset = items.length;
+      state.total = Number(payload.total || 0);
     } else {
       state.offset += items.length;
     }
@@ -385,7 +394,7 @@ async function fetchEntries({ reset = false } = {}) {
       : null;
     state.hasMore = payload.has_more === true;
   } catch (err) {
-    if (generation !== state.entriesGeneration) return;
+    if (signal?.aborted || state.entriesRequest !== request) return;
     if (reset || !listEl.children.length) {
       state.offset = 0;
       state.total = null;
@@ -395,15 +404,13 @@ async function fetchEntries({ reset = false } = {}) {
     }
     console.error(err);
   } finally {
+    if (state.entriesRequest !== request) return;
     ui.setMeta(metaEl, state);
     moreEl.hidden = !state.hasMore;
     state.loading = false;
+    state.entriesRequest = null;
     if (!state.mutating) listEl.removeAttribute("aria-busy");
     moreEl.disabled = false;
-    if (state.pendingReset) {
-      state.pendingReset = false;
-      void fetchEntries({ reset: true });
-    }
   }
 }
 
@@ -495,7 +502,18 @@ searchForm.addEventListener("submit", (event) => {
 });
 
 moreEl.addEventListener("click", () => {
-  void fetchEntries({ reset: false });
+  void fetchEntries({
+    reset: false,
+    signal: state.refreshController?.signal
+  });
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    stopInsPolling();
+  } else {
+    void pollInsStatus();
+  }
 });
 
 void pollInsStatus().then(refreshFilteredView);

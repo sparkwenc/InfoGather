@@ -23,8 +23,8 @@ async function postJson(url, body) {
   return payload;
 }
 
-async function getInsStatus() {
-  const { payload } = await requestJson("/api/ins/status");
+async function getInsStatus(signal) {
+  const { payload } = await requestJson("/api/ins/status", { signal });
   return payload;
 }
 
@@ -41,13 +41,13 @@ async function runIns() {
   return payload;
 }
 
-async function getTagTree(params) {
-  const { payload } = await requestJson(`/api/tag-tree?${params}`);
+async function getTagTree(params, signal) {
+  const { payload } = await requestJson(`/api/tag-tree?${params}`, { signal });
   return payload;
 }
 
-async function getEntries(params) {
-  const { payload } = await requestJson(`/api/entries?${params}`);
+async function getEntries(params, signal) {
+  const { payload } = await requestJson(`/api/entries?${params}`, { signal });
   return payload;
 }
 
