@@ -3,7 +3,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import closing, contextmanager, redirect_stdout
 from pathlib import Path
 
 from infogather.storage import InfoStorage, SCHEMA_VERSION
@@ -40,6 +40,12 @@ def _items(storage: InfoStorage) -> list[dict]:
     return storage.query_entries(limit=1000)["items"]
 
 
+@contextmanager
+def _connect(path: Path):
+    with closing(sqlite3.connect(path)) as connection, connection:
+        yield connection
+
+
 class InfoStorageTests(unittest.TestCase):
     def test_initialization_creates_database_parent(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -67,7 +73,7 @@ class InfoStorageTests(unittest.TestCase):
     def test_pre_feed_cache_schema_requires_writable_migration(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "entries.db"
-            with sqlite3.connect(db_path) as conn:
+            with _connect(db_path) as conn:
                 conn.executescript(
                     """
                     CREATE TABLE tab_entries (
@@ -95,14 +101,14 @@ class InfoStorageTests(unittest.TestCase):
             db_path = Path(td) / "entries.db"
             with InfoStorage(db_path):
                 pass
-            with sqlite3.connect(db_path) as conn:
+            with _connect(db_path) as conn:
                 conn.execute("DROP INDEX idx_entries_page")
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
 
             with InfoStorage(db_path):
                 pass
 
-            with sqlite3.connect(db_path) as conn:
+            with _connect(db_path) as conn:
                 indexes = {
                     row[1]
                     for row in conn.execute("PRAGMA index_list(tab_entries)")
@@ -118,11 +124,11 @@ class InfoStorageTests(unittest.TestCase):
 
             with InfoStorage(db_path):
                 pass
-            with sqlite3.connect(db_path) as conn:
+            with _connect(db_path) as conn:
                 conn.execute("DROP INDEX idx_entries_page")
             with InfoStorage(db_path):
                 pass
-            with sqlite3.connect(db_path) as conn:
+            with _connect(db_path) as conn:
                 indexes = {
                     row[1] for row in conn.execute("PRAGMA index_list(tab_entries)")
                 }
@@ -131,13 +137,13 @@ class InfoStorageTests(unittest.TestCase):
     def test_future_schema_is_rejected_without_changes(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "entries.db"
-            with sqlite3.connect(db_path) as conn:
+            with _connect(db_path) as conn:
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
 
             with self.assertRaisesRegex(RuntimeError, "newer"):
                 InfoStorage(db_path)
 
-            with sqlite3.connect(db_path) as conn:
+            with _connect(db_path) as conn:
                 self.assertEqual(
                     conn.execute("PRAGMA user_version").fetchone()[0],
                     SCHEMA_VERSION + 1,
@@ -155,7 +161,7 @@ class InfoStorageTests(unittest.TestCase):
             legacy_path = Path(td) / "legacy.db"
             with InfoStorage(fresh_path):
                 pass
-            with sqlite3.connect(legacy_path) as conn:
+            with _connect(legacy_path) as conn:
                 conn.executescript(
                     """
                     CREATE TABLE tab_entries (
@@ -201,7 +207,7 @@ class InfoStorageTests(unittest.TestCase):
                 self.assertEqual(_items(storage)[0]["srce_id"], "2601.00001")
 
             def signature(path: Path) -> tuple:
-                with sqlite3.connect(path) as conn:
+                with _connect(path) as conn:
                     return (
                         tuple(conn.execute("PRAGMA table_info(tab_entries)")),
                         tuple(conn.execute("PRAGMA table_info(tab_feed_state)")),
@@ -209,7 +215,7 @@ class InfoStorageTests(unittest.TestCase):
                     )
 
             self.assertEqual(signature(legacy_path), signature(fresh_path))
-            with sqlite3.connect(legacy_path) as conn:
+            with _connect(legacy_path) as conn:
                 tables = {
                     row[0]
                     for row in conn.execute(
@@ -222,7 +228,7 @@ class InfoStorageTests(unittest.TestCase):
     def test_failed_migration_rolls_back_schema_and_version(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "entries.db"
-            with sqlite3.connect(db_path) as conn:
+            with _connect(db_path) as conn:
                 conn.executescript(
                     """
                     CREATE TABLE tab_entries (
@@ -245,7 +251,7 @@ class InfoStorageTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "cannot migrate entry"):
                 InfoStorage(db_path)
 
-            with sqlite3.connect(db_path) as conn:
+            with _connect(db_path) as conn:
                 self.assertEqual(
                     conn.execute("PRAGMA user_version").fetchone()[0], 4
                 )
@@ -259,7 +265,7 @@ class InfoStorageTests(unittest.TestCase):
     def test_feed_state_url_must_be_primary_key(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "entries.db"
-            with sqlite3.connect(db_path) as conn:
+            with _connect(db_path) as conn:
                 conn.execute(
                     """
                     CREATE TABLE tab_feed_state (
@@ -277,7 +283,7 @@ class InfoStorageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "entries.db"
             content = json.dumps(_entry(version=1)["content"])
-            with sqlite3.connect(db_path) as conn:
+            with _connect(db_path) as conn:
                 conn.execute(
                     """
                     CREATE TABLE tab_entries (
@@ -532,7 +538,7 @@ class InfoStorageTests(unittest.TestCase):
     def test_read_only_legacy_schema_raises_clear_error(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "entries.db"
-            with sqlite3.connect(db_path) as conn:
+            with _connect(db_path) as conn:
                 conn.execute(
                     """
                     CREATE TABLE tab_entries (
@@ -640,11 +646,11 @@ class InfoStorageTests(unittest.TestCase):
             with InfoStorage(db_path) as storage:
                 with redirect_stdout(io.StringIO()):
                     storage.insert_entries([_entry(version=1)])
-            with sqlite3.connect(db_path) as conn, self.assertRaises(
+            with _connect(db_path) as conn, self.assertRaises(
                 sqlite3.IntegrityError
             ):
                 conn.execute("UPDATE tab_entries SET content = ?", ("not-json",))
-            with sqlite3.connect(db_path) as conn:
+            with _connect(db_path) as conn:
                 count = conn.execute("SELECT COUNT(*) FROM tab_entries").fetchone()[0]
             self.assertEqual(count, 1)
 
