@@ -5,17 +5,19 @@ url = "https://rss.arxiv.org/rss/math.AG"
 [[Journals]]
 key = "annals"
 name = "Annals of Mathematics"
-url = "https://annals.math.princeton.edu/feed"
-fallback_url = "https://api.crossref.org/journals/0003-486X/works?sort=published&order=desc&rows=20&select=DOI,title,author,published,URL,abstract,resource"
+url = "https://api.crossref.org/journals/0003-486X/works?filter=type:journal-article&sort=published&order=desc&rows=50&select=DOI,title,author,published,URL,abstract,resource"
 
 [[Journals]]
 key = "jams"
 name = "Journal of the American Mathematical Society"
-url = "https://www.ams.org/rss/jams.rss"
-metadata_url = "https://api.crossref.org/journals/0894-0347/works?sort=published&order=desc&rows=50&select=DOI,title,author,published,URL,abstract"
+url = "https://api.crossref.org/journals/0894-0347/works?filter=type:journal-article&sort=published&order=desc&rows=50&select=DOI,title,author,published,URL,abstract,resource"
 
 [[Journals]]
 key = "inventiones"
 name = "Inventiones mathematicae"
-url = "https://link.springer.com/search.rss?facet-content-type=Article&facet-journal-id=222"
-metadata_url = "https://api.crossref.org/journals/0020-9910/works?sort=published&order=desc&rows=50&select=DOI,title,author,published,URL,abstract"
+url = "https://api.crossref.org/journals/0020-9910/works?filter=type:journal-article&sort=published&order=desc&rows=50&select=DOI,title,author,published,URL,abstract,resource"
+
+[[Journals]]
+key = "acta"
+name = "Acta Mathematica"
+url = "https://api.crossref.org/journals/0001-5962/works?filter=type:journal-article&sort=published&order=desc&rows=50&select=DOI,title,author,published,URL,abstract,resource"

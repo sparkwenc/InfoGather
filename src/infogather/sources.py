@@ -5,6 +5,7 @@ import json
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from html import unescape
 from html.parser import HTMLParser
 from urllib.error import HTTPError
 from urllib.parse import urlparse
@@ -92,11 +93,6 @@ def configured_sources(conf: dict) -> list[dict]:
                 "name": name,
                 "url": url,
                 "selector_value": selector,
-                **{
-                    field: str(item[field]).strip()
-                    for field in ("fallback_url", "metadata_url")
-                    if str(item.get(field, "")).strip()
-                },
             })
     return sources
 
@@ -126,13 +122,13 @@ class InfoSources:
             item["feed"] for item in raw_feeds
             if item["source"]["srce_ty"] == "arXiv"
         ])
-        rss = self._normalized_rss([
+        journals = self._normalized_rss([
             item for item in raw_feeds
             if item["source"]["srce_ty"] != "arXiv"
         ])
         print(f"arXiv: {len(arxiv):3d} normalized")
-        print(f"RSS:   {len(rss):3d} normalized")
-        normalized = [*arxiv, *rss]
+        print(f"Journals: {len(journals):3d} normalized")
+        normalized = [*arxiv, *journals]
         deduplicated = self._deduplicate_entries(normalized)
         duplicate_count = len(normalized) - len(deduplicated)
         if duplicate_count:
@@ -180,8 +176,9 @@ class InfoSources:
         ) as executor:
             futures = {
                 executor.submit(
-                    self._fetch_source,
-                    source,
+                    self._fetch_feed,
+                    source["url"],
+                    source["name"],
                     state,
                 ): (index, source)
                 for index, source, state in pending
@@ -192,18 +189,14 @@ class InfoSources:
                 url = source["url"]
                 completed += 1
                 try:
-                    feed, state_update, metadata = future.result()
+                    feed, state_update = future.result()
                     state_updates[url] = state_update
                     if feed is None:
                         cached += 1
                         print(f"SOURCE {completed}/{total}: not modified {name}")
                         continue
                     count = len(feed.get("entries", []))
-                    feeds[index] = {
-                        "source": source,
-                        "feed": feed,
-                        "metadata": metadata,
-                    }
+                    feeds[index] = {"source": source, "feed": feed}
                     total_entries += count
                     print(f"SOURCE {completed}/{total}: {count:3d} from {name}")
                 except Exception as exc:
@@ -219,48 +212,6 @@ class InfoSources:
         if failed == total and not cached:
             raise RuntimeError("all configured feeds failed")
         return [feeds[index] for index in sorted(feeds)], state_updates
-
-    def _fetch_source(
-        self,
-        source: dict,
-        state: dict,
-    ) -> tuple[dict | None, dict, dict | None]:
-        fallback_url = source.get("fallback_url")
-        try:
-            feed, state_update = self._fetch_feed(
-                source["url"],
-                source["name"],
-                state,
-                attempts=1 if fallback_url else 2,
-            )
-        except Exception as exc:
-            if not fallback_url:
-                raise
-            print(f"      {source['name']}: primary failed ({exc}), using fallback")
-            feed, state_update = self._fetch_feed(
-                fallback_url,
-                f"{source['name']} fallback",
-                attempts=2,
-            )
-            state_update["etag"] = None
-            state_update["last_modified"] = None
-            state_update["next_fetch_at"] = max(
-                state_update["next_fetch_at"],
-                time.time() + 1800,
-            )
-
-        metadata = None
-        metadata_url = source.get("metadata_url")
-        if feed is not None and metadata_url:
-            try:
-                metadata, _ = self._fetch_feed(
-                    metadata_url,
-                    f"{source['name']} metadata",
-                    attempts=1,
-                )
-            except Exception as exc:
-                print(f"      {source['name']}: metadata unavailable ({exc})")
-        return feed, state_update, metadata
 
     @staticmethod
     def _fetch_feed(
@@ -333,7 +284,7 @@ class InfoSources:
                     feed = InfoSources._crossref_feed(
                         json.loads(response_content)
                     )
-                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                except (TypeError, ValueError) as exc:
                     feed = {"bozo": True, "bozo_exception": exc, "entries": []}
             else:
                 feed = feedparser.parse(
@@ -367,7 +318,12 @@ class InfoSources:
             if not isinstance(work, dict):
                 continue
             titles = work.get("title", [])
-            title = titles[0] if isinstance(titles, list) and titles else titles
+            if isinstance(titles, list):
+                title = str(titles[0]).strip() if titles else ""
+            else:
+                title = str(titles or "").strip()
+            if not title:
+                continue
             authors = []
             for author in work.get("author", []) or []:
                 if not isinstance(author, dict):
@@ -385,13 +341,16 @@ class InfoSources:
             primary = resource.get("primary", {})
             if not isinstance(primary, dict):
                 primary = {}
+            identifier = str(work.get("DOI") or "").strip()
+            link = primary.get("URL") or work.get("URL")
+            if not identifier and not link:
+                continue
             entry = {
-                "id": str(work.get("DOI") or ""),
-                "link": primary.get("URL") or work.get("URL"),
-                "title": str(title or ""),
+                "id": identifier,
+                "link": link,
+                "title": title,
                 "author": ", ".join(authors),
                 "summary": str(work.get("abstract") or ""),
-                "crossref": True,
             }
             published = work.get("published", {})
             if not isinstance(published, dict):
@@ -587,25 +546,13 @@ class InfoSources:
         parser = _TextExtractor()
         parser.feed(str(value or ""))
         parser.close()
-        return " ".join("".join(parser.parts).split())
+        return " ".join(unescape("".join(parser.parts)).split())
 
     def _normalized_rss(self, feeds: list[dict]) -> list[dict]:
         normalized = []
         for item in feeds:
             source = item["source"]
             feed = item["feed"]
-            metadata_by_id = {}
-            metadata_by_title = {}
-            metadata = item.get("metadata") or {}
-            for value in metadata.get("entries", []):
-                if not isinstance(value, dict):
-                    continue
-                raw_id = str(value.get("id") or "").strip().casefold()
-                title = self._plain_text(value.get("title")).casefold()
-                if raw_id:
-                    metadata_by_id[raw_id] = value
-                if title:
-                    metadata_by_title[title] = value
             feed_dt = self._parsed_iso(feed.get("feed", {}))
             feed_dt = feed_dt or datetime.now(timezone.utc).isoformat()
             source_url = urlparse(source["url"])
@@ -616,10 +563,6 @@ class InfoSources:
                     print(f"{source['name']}: entry without ID or link skipped")
                     continue
                 title = self._plain_text(entry.get("title"))
-                extra = (
-                    metadata_by_id.get(raw_id.strip().casefold())
-                    or metadata_by_title.get(title.casefold())
-                )
 
                 author = str(entry.get("author") or "").strip()
                 if not author:
@@ -639,26 +582,13 @@ class InfoSources:
                     if len(parts) == 2:
                         author = self._plain_text(parts[0])
                         summary = parts[1]
-                if (
-                    source_url.hostname == "annals.math.princeton.edu"
-                    and not entry.get("crossref")
-                ):
+                if source_url.hostname == "annals.math.princeton.edu":
                     # The feed's dc:creator is a WordPress editor, not the paper author.
                     author = ""
 
                 content = entry.get("content", []) or []
                 if content and isinstance(content[0], dict):
                     summary = str(content[0].get("value") or summary)
-                if extra:
-                    author = author or str(extra.get("author") or "").strip()
-                    if (
-                        extra.get("summary")
-                        and (
-                            not summary.strip()
-                            or source_url.hostname in {"ams.org", "www.ams.org"}
-                        )
-                    ):
-                        summary = str(extra["summary"])
                 tags = []
                 for tag in entry.get("tags", []) or []:
                     if not isinstance(tag, dict):
