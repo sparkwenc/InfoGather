@@ -196,6 +196,10 @@ let cardSequence = 0;
   }
 
   function renderTree(treeListEl, state, handlers) {
+    const openGroups = new Map(Array.from(
+      treeListEl.querySelectorAll("details[data-source-group]"),
+      (details) => [details.dataset.sourceGroup, details.open]
+    ));
     const groups = [];
     if (!state.treeGroups.length) {
       const empty = document.createElement("li");
@@ -210,7 +214,8 @@ let cardSequence = 0;
       groupLi.className = "tree-item";
 
       const details = document.createElement("details");
-      details.open = true;
+      details.dataset.sourceGroup = group.name;
+      details.open = openGroups.get(group.name) ?? true;
       const title = document.createElement("summary");
       title.className = "tree-group-title";
 
