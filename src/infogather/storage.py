@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlparse
 from .filters import parse_updated
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 BUSY_TIMEOUT_MS = 10_000
 SQLITE_INT_MAX = 2 ** 63 - 1
 MAX_SOURCE_TYPE_LENGTH = 512
@@ -27,10 +27,14 @@ class InfoStorage:
     ) -> None:
         raw_path = str(db_path)
         is_uri = raw_path.startswith("file:")
-        self._read_only = is_uri and "mode=ro" in raw_path
+        uri_mode = (
+            parse_qs(urlparse(raw_path).query).get("mode", [""])[0]
+            if is_uri else ""
+        )
+        self._read_only = uri_mode == "ro"
+        self._memory = raw_path == ":memory:" or uri_mode == "memory"
         if is_uri and not _initialize:
-            mode = parse_qs(urlparse(raw_path).query).get("mode", [""])[0]
-            if mode not in {"ro", "rw"}:
+            if uri_mode not in {"ro", "rw"}:
                 raise ValueError("open_current SQLite URI requires mode=ro or mode=rw")
         if raw_path == ":memory:" or is_uri:
             resolved_path = raw_path
@@ -427,9 +431,9 @@ class InfoStorage:
         conn.execute("PRAGMA foreign_keys = ON")
         if self._read_only:
             return
-        if initialize and raw_path != ":memory:" and "mode=memory" not in raw_path:
+        if initialize and not self._memory:
             conn.execute("PRAGMA journal_mode = WAL")
-        if raw_path != ":memory:" and "mode=memory" not in raw_path:
+        if not self._memory:
             conn.execute("PRAGMA synchronous = NORMAL")
 
     @staticmethod
@@ -591,9 +595,9 @@ class InfoStorage:
             ]
 
         if columns("tab_entries") != expected_entries:
-            raise RuntimeError("database schema v5 has invalid tab_entries columns")
+            raise RuntimeError("current schema has invalid tab_entries columns")
         if columns("tab_feed_state") != expected_feed_state:
-            raise RuntimeError("database schema v5 has invalid tab_feed_state columns")
+            raise RuntimeError("current schema has invalid tab_feed_state columns")
 
         indexes = {
             row["name"]: row
@@ -601,17 +605,23 @@ class InfoStorage:
             if row["origin"] == "c"
         }
         if set(indexes) != {"idx_entries_page", "idx_entries_favored_page"}:
-            raise RuntimeError("database schema v5 has invalid tab_entries indexes")
+            raise RuntimeError("current schema has invalid tab_entries indexes")
         for name in indexes:
             indexed_columns = [
-                row["name"] for row in conn.execute(f"PRAGMA index_info({name})")
+                (row["name"], row["desc"], row["coll"])
+                for row in conn.execute(f"PRAGMA index_xinfo({name})")
+                if row["key"] == 1
             ]
-            if indexed_columns != ["updated_at_us", "srce_ty", "srce_id"]:
-                raise RuntimeError(f"database schema v5 has invalid index {name}")
+            if indexed_columns != [
+                ("updated_at_us", 1, "BINARY"),
+                ("srce_ty", 0, "BINARY"),
+                ("srce_id", 0, "BINARY"),
+            ]:
+                raise RuntimeError(f"current schema has invalid index {name}")
         if indexes["idx_entries_page"]["partial"] != 0 or indexes[
             "idx_entries_favored_page"
         ]["partial"] != 1:
-            raise RuntimeError("database schema v5 has invalid index predicates")
+            raise RuntimeError("current schema has invalid index predicates")
         favored_index_sql = " ".join(
             conn.execute(
                 "SELECT sql FROM sqlite_schema "
@@ -619,7 +629,7 @@ class InfoStorage:
             ).fetchone()[0].lower().split()
         )
         if not favored_index_sql.endswith("where favored = 1"):
-            raise RuntimeError("database schema v5 has invalid favored index")
+            raise RuntimeError("current schema has invalid favored index")
 
         schema_sql = " ".join(
             conn.execute(
@@ -627,14 +637,17 @@ class InfoStorage:
             ).fetchone()[0].lower().split()
         )
         required_checks = (
-            "check (typeof(version) = 'integer' and version between 1",
+            f"check (length(srce_ty) between 1 and {MAX_SOURCE_TYPE_LENGTH})",
+            f"check (length(srce_id) between 1 and {MAX_SOURCE_ID_LENGTH})",
+            f"check (typeof(version) = 'integer' and version between 1 and {SQLITE_INT_MAX})",
             "check (typeof(favored) = 'integer' and favored in (0, 1))",
             "check (typeof(noticed) = 'integer' and noticed in (0, 1))",
-            "check (typeof(state_rev) = 'integer' and state_rev between 0",
+            f"check (typeof(state_rev) = 'integer' and state_rev between 0 and {SQLITE_INT_MAX})",
+            "check (typeof(updated_at_us) = 'integer')",
             "check (json_valid(content) and json_type(content) = 'object')",
         )
         if any(check not in schema_sql for check in required_checks):
-            raise RuntimeError("database schema v5 has invalid tab_entries checks")
+            raise RuntimeError("current schema has invalid tab_entries checks")
         feed_sql = " ".join(
             conn.execute(
                 "SELECT sql FROM sqlite_schema WHERE name = 'tab_feed_state'"
@@ -644,7 +657,7 @@ class InfoStorage:
             "check (length(trim(url)) > 0)" not in feed_sql
             or f"and next_fetch_at between 0 and {MAX_FETCH_AT}" not in feed_sql
         ):
-            raise RuntimeError("database schema v5 has invalid tab_feed_state checks")
+            raise RuntimeError("current schema has invalid tab_feed_state checks")
 
     def _install_canonical_schema(self) -> None:
         conn = self._get_conn()
@@ -668,8 +681,8 @@ class InfoStorage:
                 raise RuntimeError(
                     f"cannot migrate tab_entries; missing columns: {sorted(missing)}"
                 )
-            conn.execute("DROP TABLE IF EXISTS tab_entries_v5")
-            self._create_entries_table("tab_entries_v5")
+            conn.execute("DROP TABLE IF EXISTS tab_entries_v6")
+            self._create_entries_table("tab_entries_v6")
             noticed_sql = "noticed" if "noticed" in columns else "0 AS noticed"
             state_rev_sql = (
                 "state_rev" if "state_rev" in columns else "0 AS state_rev"
@@ -696,8 +709,10 @@ class InfoStorage:
                             "updated": row["updated"],
                             "content": content,
                         })
-                        state_rev = int(row["state_rev"])
-                        if not 0 <= state_rev <= SQLITE_INT_MAX:
+                        state_rev = row["state_rev"]
+                        if type(state_rev) is not int or not (
+                            0 <= state_rev <= SQLITE_INT_MAX
+                        ):
                             raise ValueError("invalid state revision")
                     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
                         raise RuntimeError(
@@ -711,7 +726,7 @@ class InfoStorage:
                     ))
                 conn.executemany(
                     """
-                    INSERT INTO tab_entries_v5 (
+                    INSERT INTO tab_entries_v6 (
                         srce_ty, srce_id, version, favored, noticed, state_rev,
                         updated, updated_at_us, content
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -719,7 +734,7 @@ class InfoStorage:
                     values,
                 )
             conn.execute("DROP TABLE tab_entries")
-            conn.execute("ALTER TABLE tab_entries_v5 RENAME TO tab_entries")
+            conn.execute("ALTER TABLE tab_entries_v6 RENAME TO tab_entries")
         else:
             self._create_entries_table("tab_entries")
 
@@ -786,9 +801,9 @@ class InfoStorage:
         ]
         if "url" not in columns or primary_key != ["url"]:
             raise RuntimeError("tab_feed_state URL must be its primary key")
-        conn.execute("DROP TABLE IF EXISTS tab_feed_state_v5")
+        conn.execute("DROP TABLE IF EXISTS tab_feed_state_v6")
         conn.execute(f"""
-            CREATE TABLE tab_feed_state_v5 (
+            CREATE TABLE tab_feed_state_v6 (
                 url TEXT PRIMARY KEY NOT NULL CHECK (length(trim(url)) > 0),
                 etag TEXT,
                 last_modified TEXT,
@@ -809,7 +824,7 @@ class InfoStorage:
         )
         next_fetch = "next_fetch_at" if "next_fetch_at" in columns else "0"
         conn.execute(f"""
-            INSERT INTO tab_feed_state_v5 (
+            INSERT INTO tab_feed_state_v6 (
                 url, etag, last_modified, next_fetch_at
             )
             SELECT url, {etag}, {modified},
@@ -822,7 +837,7 @@ class InfoStorage:
             FROM tab_feed_state
         """)
         conn.execute("DROP TABLE tab_feed_state")
-        conn.execute("ALTER TABLE tab_feed_state_v5 RENAME TO tab_feed_state")
+        conn.execute("ALTER TABLE tab_feed_state_v6 RENAME TO tab_feed_state")
 
     def _upsert_row(
         self,

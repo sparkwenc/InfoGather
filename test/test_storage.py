@@ -54,6 +54,15 @@ class InfoStorageTests(unittest.TestCase):
                 pass
             self.assertTrue(db_path.is_file())
 
+    def test_file_path_containing_memory_mode_text_still_uses_wal(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "mode=memory.db"
+            with InfoStorage(db_path) as storage:
+                journal_mode = storage._get_conn().execute(
+                    "PRAGMA journal_mode"
+                ).fetchone()[0]
+            self.assertEqual(journal_mode, "wal")
+
     def test_initialization_supports_sqlite_file_uri(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "entries.db"
@@ -233,6 +242,105 @@ class InfoStorageTests(unittest.TestCase):
                 }
             self.assertNotIn("tab_entry_tags", tables)
             self.assertNotIn("tab_entries_fts", tables)
+
+    def test_migrates_previous_v5_schema_with_data_and_feed_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "entries.db"
+            entry = _entry(version=1)
+            with _connect(db_path) as conn:
+                conn.executescript(
+                    """
+                    CREATE TABLE tab_entries (
+                        srce_ty TEXT NOT NULL,
+                        srce_id TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1,
+                        favored INTEGER NOT NULL DEFAULT 0,
+                        noticed INTEGER NOT NULL DEFAULT 0,
+                        state_rev INTEGER NOT NULL DEFAULT 0,
+                        updated TEXT NOT NULL,
+                        updated_at_us INTEGER NOT NULL DEFAULT 0,
+                        content TEXT NOT NULL,
+                        PRIMARY KEY (srce_ty, srce_id),
+                        CHECK (version >= 1),
+                        CHECK (favored IN (0, 1)),
+                        CHECK (noticed IN (0, 1)),
+                        CHECK (state_rev >= 0),
+                        CHECK (json_valid(content) AND json_type(content) = 'object')
+                    );
+                    CREATE INDEX idx_entries_page
+                    ON tab_entries(updated_at_us DESC, srce_ty, srce_id);
+                    CREATE INDEX idx_entries_favored_page
+                    ON tab_entries(updated_at_us DESC, srce_ty, srce_id)
+                    WHERE favored = 1;
+                    CREATE TABLE tab_feed_state (
+                        url TEXT PRIMARY KEY,
+                        etag TEXT,
+                        last_modified TEXT,
+                        next_fetch_at REAL NOT NULL DEFAULT 0
+                    );
+                    PRAGMA user_version = 5;
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO tab_entries (
+                        srce_ty, srce_id, version, favored, noticed, state_rev,
+                        updated, updated_at_us, content
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        entry["srce_ty"], entry["srce_id"], entry["version"],
+                        entry["favored"], entry["noticed"], entry["state_rev"],
+                        entry["updated"], 0, json.dumps(entry["content"]),
+                    ),
+                )
+                conn.execute(
+                    "INSERT INTO tab_feed_state VALUES (?, ?, ?, ?)",
+                    ("https://example.com/feed", "etag", "today", 123.0),
+                )
+
+            with InfoStorage(db_path) as storage:
+                self.assertEqual(_items(storage)[0]["srce_id"], "2601.00001")
+                self.assertEqual(
+                    storage.get_feed_states()["https://example.com/feed"]["etag"],
+                    "etag",
+                )
+                self.assertEqual(storage._schema_version(), SCHEMA_VERSION)
+
+    def test_migration_rejects_fractional_legacy_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "entries.db"
+            entry = _entry(version=1)
+            with _connect(db_path) as conn:
+                conn.executescript(
+                    """
+                    CREATE TABLE tab_entries (
+                        srce_ty TEXT NOT NULL,
+                        srce_id TEXT NOT NULL,
+                        version INTEGER NOT NULL,
+                        favored INTEGER NOT NULL,
+                        noticed INTEGER NOT NULL,
+                        state_rev REAL NOT NULL,
+                        updated TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        PRIMARY KEY (srce_ty, srce_id)
+                    );
+                    PRAGMA user_version = 5;
+                    """
+                )
+                conn.execute(
+                    "INSERT INTO tab_entries VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        entry["srce_ty"], entry["srce_id"], entry["version"],
+                        0, 0, 1.9, entry["updated"],
+                        json.dumps(entry["content"]),
+                    ),
+                )
+
+            with self.assertRaisesRegex(RuntimeError, "invalid state revision"):
+                InfoStorage(db_path)
+            with _connect(db_path) as conn:
+                self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 5)
 
     def test_failed_migration_rolls_back_schema_and_version(self) -> None:
         with tempfile.TemporaryDirectory() as td:
