@@ -1,6 +1,6 @@
 from .storage import InfoStorage
 from .paths import DEFAULT_CONFIG_PATH, DEFAULT_DB_PATH, WEB_DIR
-from .cli import _cmd_ins
+from .ingestion import run_ingestion
 
 import argparse
 import base64
@@ -165,13 +165,14 @@ def _clear_removed_entry() -> None:
 def _run_ins_job(db_path: str | Path, conf_path: Path) -> None:
     try:
         _ins_update(progress=10, message="正在拉取")
-        _cmd_ins(
-            argparse.Namespace(db_path=db_path, conf=conf_path)
-        )
+        result = run_ingestion(db_path, conf_path)
         _ins_update(
             state="succeeded",
             progress=100,
-            message="拉取完成",
+            message=(
+                f"拉取完成: {result.changed_entries}/"
+                f"{result.normalized_entries} 条更新"
+            ),
             ended_at=_utcnow_iso(),
         )
     except Exception as exc:

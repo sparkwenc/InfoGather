@@ -15,6 +15,7 @@ from infogather.serve import (
     _normalize_db_path,
     _run_ins_job,
 )
+from infogather.ingestion import IngestionResult
 import infogather.serve as serve
 
 
@@ -68,15 +69,17 @@ class ServeInsTests(unittest.TestCase):
             serve.INS_JOB["ended_at"] = None
 
     def test_run_ins_job_passes_database_and_config_paths(self) -> None:
-        with mock.patch.object(serve, "_cmd_ins", return_value=0) as command:
+        result = IngestionResult(2, 1, 0, 3, 2)
+        with mock.patch.object(
+            serve, "run_ingestion", return_value=result
+        ) as ingestion:
             db_path = Path("/tmp/custom-entries.db")
             conf_path = Path("/tmp/custom-config.toml")
             _run_ins_job(db_path, conf_path)
 
-        args = command.call_args.args[0]
-        self.assertEqual(args.db_path, db_path)
-        self.assertEqual(args.conf, conf_path)
+        ingestion.assert_called_once_with(db_path, conf_path)
         self.assertEqual(serve.INS_JOB["state"], "succeeded")
+        self.assertEqual(serve.INS_JOB["message"], "拉取完成: 2/3 条更新")
 
     def test_web_assets_are_packaged_with_server(self) -> None:
         self.assertTrue((serve.WEB_DIR / "index.html").is_file())

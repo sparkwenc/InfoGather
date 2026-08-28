@@ -147,10 +147,56 @@ class InfoSourcesTests(unittest.TestCase):
         )
 
         with patch.object(source, "_fetch_feed") as fetch, patch("builtins.print"):
-            feeds = source._fetch_raw_feeds()
+            feeds, updates = source._fetch_raw_feeds()
 
         fetch.assert_not_called()
         self.assertEqual(feeds, [])
+        self.assertEqual(updates, {})
+
+    def test_fetch_results_follow_config_order_and_exclude_failed_state(self) -> None:
+        urls = [f"https://example.com/{name}" for name in ("first", "bad", "last")]
+        source = InfoSources({
+            "arXiv": [
+                {"name": name, "url": url}
+                for name, url in zip(("first", "bad", "last"), urls)
+            ]
+        })
+
+        def fetch(url, name, _state):
+            if name == "bad":
+                raise RuntimeError("failed")
+            return {"name": name, "entries": []}, {"etag": name}
+
+        with (
+            patch.object(source, "_fetch_feed", side_effect=fetch),
+            patch(
+                "infogather.sources.as_completed",
+                side_effect=lambda futures: reversed(list(futures)),
+            ),
+            patch("builtins.print"),
+        ):
+            feeds, updates = source._fetch_raw_feeds()
+
+        self.assertEqual([feed["name"] for feed in feeds], ["first", "last"])
+        self.assertEqual(set(updates), {urls[0], urls[2]})
+        self.assertEqual(source.failed_feeds, 1)
+
+    def test_cache_state_is_published_only_after_normalization(self) -> None:
+        source = InfoSources({})
+        update = {"https://example.com/feed": {"etag": "new"}}
+        with (
+            patch.object(source, "_fetch_raw_feeds", return_value=([{}], update)),
+            patch.object(
+                source,
+                "_normalized_arXiv",
+                side_effect=RuntimeError("normalization failed"),
+            ),
+            patch("builtins.print"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "normalization failed"):
+                source.get_normalized_feeds()
+
+        self.assertEqual(source.feed_state_updates, {})
 
     def test_deduplicate_entries_keeps_newest_and_merges_tags(self) -> None:
         first = {

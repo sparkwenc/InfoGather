@@ -1,22 +1,13 @@
-import tomllib
 import argparse
 
-from .sources import InfoSources
+from .ingestion import run_ingestion
 from .storage import InfoStorage
 from . import filters
 from .paths import DEFAULT_CONFIG_PATH, DEFAULT_DB_PATH, DEFAULT_OUTPUT_PATH
 
 
 def _cmd_ins(args: argparse.Namespace) -> int:
-    with open(args.conf, "rb") as f:
-        conf = tomllib.load(f)
-    with InfoStorage(args.db_path) as storage:
-        sources = InfoSources(
-            conf,
-            feed_states=storage.get_feed_states(),
-        )
-        entries = sources.get_normalized_feeds()
-        storage.insert_entries(entries, sources.feed_state_updates)
+    run_ingestion(args.db_path, args.conf)
     return 0
 
 

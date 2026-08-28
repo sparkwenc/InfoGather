@@ -23,10 +23,14 @@ class InfoSources:
         self._feed_states = feed_states or {}
         self._max_workers = max(1, max_workers)
         self.feed_state_updates: dict[str, dict] = {}
+        self.total_feeds = 0
+        self.cached_feeds = 0
+        self.failed_feeds = 0
 
     def get_normalized_feeds(self) -> list:
         """return normalized entries from all sources"""
-        raw_feeds = self._fetch_raw_feeds()
+        self.feed_state_updates = {}
+        raw_feeds, state_updates = self._fetch_raw_feeds()
 
         print("Normalizing feeds...")
         normalized = self._normalized_arXiv(raw_feeds)
@@ -36,13 +40,15 @@ class InfoSources:
         if duplicate_count:
             print(f"Deduplicated: {duplicate_count:3d} cross-listed entries")
         print(f"Total: {len(deduplicated):3d} normalized\n")
+        self.feed_state_updates = state_updates
         return deduplicated
 
     # internal methods
-    def _fetch_raw_feeds(self) -> list:
+    def _fetch_raw_feeds(self) -> tuple[list, dict[str, dict]]:
         """fetch all feeds according to the configuration"""
 
-        feeds = []
+        feeds: dict[int, dict] = {}
+        state_updates: dict[str, dict] = {}
         requests = []
         seen_urls = set()
         raw_sources = self._conf.get("arXiv", [])
@@ -62,12 +68,13 @@ class InfoSources:
             requests.append((name, url))
 
         total = len(requests)
+        self.total_feeds = total
         print(
             f"Fetching {total} feeds with up to "
             f"{min(self._max_workers, max(total, 1))} concurrent requests..."
         )
         if not requests:
-            return feeds
+            return [], state_updates
 
         now = time.time()
         pending = []
@@ -75,14 +82,14 @@ class InfoSources:
         cached = 0
         failed = 0
         total_entries = 0
-        for name, url in requests:
+        for index, (name, url) in enumerate(requests):
             state = self._feed_states.get(url, {})
             if float(state.get("next_fetch_at", 0) or 0) > now:
                 completed += 1
                 cached += 1
                 print(f"SOURCE {completed}/{total}: cached {name}")
                 continue
-            pending.append((name, url, state))
+            pending.append((index, name, url, state))
 
         with ThreadPoolExecutor(
             max_workers=min(self._max_workers, max(len(pending), 1))
@@ -93,21 +100,21 @@ class InfoSources:
                     url,
                     name,
                     state,
-                ): (name, url)
-                for name, url, state in pending
+                ): (index, name, url)
+                for index, name, url, state in pending
             }
             for future in as_completed(futures):
-                name, url = futures[future]
+                index, name, url = futures[future]
                 completed += 1
                 try:
                     feed, state_update = future.result()
-                    self.feed_state_updates[url] = state_update
+                    state_updates[url] = state_update
                     if feed is None:
                         cached += 1
                         print(f"SOURCE {completed}/{total}: not modified {name}")
                         continue
                     count = len(feed.get("entries", []))
-                    feeds.append(feed)
+                    feeds[index] = feed
                     total_entries += count
                     print(f"SOURCE {completed}/{total}: {count:3d} from {name}")
                 except Exception as exc:
@@ -118,9 +125,11 @@ class InfoSources:
             f"Fetch result: {total_entries} entries, {cached} cached, "
             f"{failed} failed from {total} feeds\n"
         )
+        self.cached_feeds = cached
+        self.failed_feeds = failed
         if failed == total and not cached:
             raise RuntimeError("all configured feeds failed")
-        return feeds
+        return [feeds[index] for index in sorted(feeds)], state_updates
 
     @staticmethod
     def _fetch_feed(
