@@ -15,6 +15,7 @@ from http import HTTPStatus
 from infogather.serve import (
     InfoHandler,
     InfoStorage,
+    ThreadingHTTPServerV6,
     _decode_cursor,
     _encode_cursor,
     _is_loopback_host,
@@ -133,6 +134,20 @@ class ServeInsTests(unittest.TestCase):
         for host in ("0.0.0.0", "::", "192.168.1.2", "example.com"):
             self.assertFalse(_is_loopback_host(host))
 
+    def test_ipv6_loopback_server_can_bind(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            handler = partial(
+                InfoHandler,
+                db_path=root / "entries.db",
+                conf_path=root / "config.toml",
+            )
+            try:
+                server = ThreadingHTTPServerV6(("::1", 0), handler)
+            except OSError as exc:
+                self.skipTest(f"IPv6 loopback is unavailable: {exc}")
+            server.server_close()
+
     def test_http_boundary_enforces_same_origin_json_and_security_headers(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "entries.db"
@@ -147,6 +162,23 @@ class ServeInsTests(unittest.TestCase):
             with _running_server(db_path) as server:
                 origin = f"http://127.0.0.1:{server.server_port}"
                 health, health_body = _request(server, "GET", "/api/health")
+                rebound_get, _ = _request(
+                    server,
+                    "GET",
+                    "/api/health",
+                    headers={"Host": "rebind.example"},
+                )
+                rebound_post, _ = _request(
+                    server,
+                    "POST",
+                    "/api/favored",
+                    body=payload,
+                    headers={
+                        "Host": "rebind.example",
+                        "Origin": "http://rebind.example",
+                        "Content-Type": "application/json",
+                    },
+                )
                 missing_origin, _ = _request(
                     server,
                     "POST",
@@ -175,6 +207,8 @@ class ServeInsTests(unittest.TestCase):
             "Content-Security-Policy"
         ))
         self.assertEqual(health.getheader("X-Frame-Options"), "DENY")
+        self.assertEqual(rebound_get.status, HTTPStatus.MISDIRECTED_REQUEST)
+        self.assertEqual(rebound_post.status, HTTPStatus.MISDIRECTED_REQUEST)
         self.assertEqual(missing_origin.status, HTTPStatus.FORBIDDEN)
         self.assertEqual(wrong_type.status, HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
         self.assertEqual(accepted.status, HTTPStatus.OK)
@@ -293,6 +327,25 @@ class ServeMutationEndpointTests(unittest.TestCase):
                     "srce_ty": "arXiv",
                     "srce_id": "2601.00001",
                     "favored": 1.9,
+                    "expected_favored": 0,
+                    "expected_revision": 0,
+                },
+            )
+
+            harness._handle_favored()
+
+            self.assertEqual(harness.status, HTTPStatus.BAD_REQUEST)
+
+    def test_favored_endpoint_rejects_non_string_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "entries.db"
+            _seed_entry(db_path)
+            harness = HandlerHarness(
+                db_path=db_path,
+                payload={
+                    "srce_ty": ["arXiv"],
+                    "srce_id": {"id": "2601.00001"},
+                    "favored": 1,
                     "expected_favored": 0,
                     "expected_revision": 0,
                 },

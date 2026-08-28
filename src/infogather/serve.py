@@ -11,6 +11,7 @@ import base64
 import ipaddress
 import json
 import secrets
+import socket
 import threading
 import tomllib
 from datetime import datetime, timedelta, timezone
@@ -243,6 +244,28 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
+def _http_authority(value: str) -> tuple[str, int] | None:
+    parsed = urlparse(f"//{value}")
+    if (
+        not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    try:
+        return parsed.hostname.casefold(), parsed.port or 80
+    except ValueError:
+        return None
+
+
+class ThreadingHTTPServerV6(ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
+
 class InfoHandler(SimpleHTTPRequestHandler):
     def __init__(
         self,
@@ -280,6 +303,12 @@ class InfoHandler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def do_GET(self) -> None:
+        if not self._request_host_is_loopback():
+            self._write_json(
+                {"error": "loopback Host required"},
+                status=HTTPStatus.MISDIRECTED_REQUEST,
+            )
+            return
         parsed = urlparse(self.path)
         if parsed.path == "/api/entries":
             self._handle_entries(parsed.query)
@@ -298,6 +327,12 @@ class InfoHandler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self) -> None:
+        if not self._request_host_is_loopback():
+            self._write_json(
+                {"error": "loopback Host required"},
+                status=HTTPStatus.MISDIRECTED_REQUEST,
+            )
+            return
         if not self._request_is_same_origin():
             self._write_json(
                 {"error": "same-origin request required"},
@@ -332,17 +367,22 @@ class InfoHandler(SimpleHTTPRequestHandler):
         )
 
     def _request_is_same_origin(self) -> bool:
-        host = self.headers.get("Host", "")
+        host = _http_authority(self.headers.get("Host", ""))
         origin = urlparse(self.headers.get("Origin", ""))
+        origin_authority = _http_authority(origin.netloc)
         return (
-            bool(host)
+            host is not None
             and origin.scheme == "http"
-            and origin.netloc == host
+            and origin_authority == host
             and not origin.path
             and not origin.params
             and not origin.query
             and not origin.fragment
         )
+
+    def _request_host_is_loopback(self) -> bool:
+        authority = _http_authority(self.headers.get("Host", ""))
+        return authority is not None and _is_loopback_host(authority[0])
 
     def _handle_entries(self, raw_query: str) -> None:
         try:
@@ -475,8 +515,12 @@ class InfoHandler(SimpleHTTPRequestHandler):
 
     @staticmethod
     def _source_key_from_payload(payload: dict) -> tuple[str, str]:
-        srce_ty = str(payload.get("srce_ty", "")).strip()
-        srce_id = str(payload.get("srce_id", "")).strip()
+        raw_srce_ty = payload.get("srce_ty")
+        raw_srce_id = payload.get("srce_id")
+        if not isinstance(raw_srce_ty, str) or not isinstance(raw_srce_id, str):
+            return "", ""
+        srce_ty = raw_srce_ty.strip()
+        srce_id = raw_srce_id.strip()
         if (
             len(srce_ty) > MAX_SOURCE_TYPE_LENGTH
             or len(srce_id) > MAX_SOURCE_ID_LENGTH
@@ -796,9 +840,16 @@ def main() -> int:
     with InfoStorage(db_path):
         pass
     handler = partial(InfoHandler, db_path=db_path, conf_path=conf_path)
-    with ThreadingHTTPServer((args.host, args.port), handler) as server:
+    bind_host = args.host.strip("[]")
+    server_class = (
+        ThreadingHTTPServerV6
+        if ipaddress.ip_address(bind_host).version == 6
+        else ThreadingHTTPServer
+    ) if bind_host != "localhost" else ThreadingHTTPServer
+    display_host = f"[{bind_host}]" if server_class is ThreadingHTTPServerV6 else bind_host
+    with server_class((bind_host, args.port), handler) as server:
         print(
-            f"Serving on http://{args.host}:{args.port} "
+            f"Serving on http://{display_host}:{args.port} "
             f"(db: {db_path}, conf: {conf_path})"
         )
         try:
