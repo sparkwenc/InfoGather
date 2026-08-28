@@ -25,3 +25,9 @@ Web UI 中的“移除”只删除当前本地记录，不会屏蔽源；仍在 
 uv run python -m unittest discover -s test -p 'test_*.py'
 uv build
 ```
+
+25,000 条记录的独立性能预算检查（不包含在常规测试中）：
+
+```bash
+INFOGATHER_PERF_DIR=/path/to/temp uv run python -m unittest test.perf_storage
+```
