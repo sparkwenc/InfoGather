@@ -1,7 +1,12 @@
 import io
+import json
 import tempfile
+import threading
 import unittest
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
+from functools import partial
+from http.client import HTTPConnection
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
@@ -12,6 +17,7 @@ from infogather.serve import (
     InfoStorage,
     _decode_cursor,
     _encode_cursor,
+    _is_loopback_host,
     _normalize_db_path,
     _run_ins_job,
 )
@@ -41,6 +47,35 @@ def _seed_entry(db_path: Path) -> None:
                     },
                 ]
             )
+
+
+@contextmanager
+def _running_server(db_path: Path):
+    handler = partial(
+        InfoHandler,
+        db_path=db_path,
+        conf_path=db_path.parent / "config.toml",
+    )
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever)
+    with mock.patch.object(InfoHandler, "log_message"):
+        thread.start()
+        try:
+            yield server
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+
+def _request(server, method: str, path: str, *, body=None, headers=None):
+    connection = HTTPConnection(*server.server_address)
+    connection.request(method, path, body=body, headers=headers or {})
+    response = connection.getresponse()
+    data = response.read()
+    connection.close()
+    return response, json.loads(data)
 
 
 class HandlerHarness(InfoHandler):
@@ -83,6 +118,64 @@ class ServeInsTests(unittest.TestCase):
 
     def test_web_assets_are_packaged_with_server(self) -> None:
         self.assertTrue((serve.WEB_DIR / "index.html").is_file())
+        index = (serve.WEB_DIR / "index.html").read_text()
+        self.assertNotIn("cdn.jsdelivr.net", index)
+        self.assertTrue(
+            (serve.WEB_DIR / "vendor" / "katex" / "katex.min.js").is_file()
+        )
+
+    def test_server_accepts_only_loopback_bindings(self) -> None:
+        for host in ("127.0.0.1", "::1", "localhost"):
+            self.assertTrue(_is_loopback_host(host))
+        for host in ("0.0.0.0", "::", "192.168.1.2", "example.com"):
+            self.assertFalse(_is_loopback_host(host))
+
+    def test_http_boundary_enforces_same_origin_json_and_security_headers(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "entries.db"
+            _seed_entry(db_path)
+            payload = json.dumps({
+                "srce_ty": "arXiv",
+                "srce_id": "2601.00001",
+                "favored": 1,
+                "expected_favored": 0,
+                "expected_revision": 0,
+            })
+            with _running_server(db_path) as server:
+                origin = f"http://127.0.0.1:{server.server_port}"
+                health, health_body = _request(server, "GET", "/api/health")
+                missing_origin, _ = _request(
+                    server,
+                    "POST",
+                    "/api/favored",
+                    body=payload,
+                    headers={"Content-Type": "application/json"},
+                )
+                wrong_type, _ = _request(
+                    server,
+                    "POST",
+                    "/api/favored",
+                    body=payload,
+                    headers={"Content-Type": "text/plain", "Origin": origin},
+                )
+                accepted, accepted_body = _request(
+                    server,
+                    "POST",
+                    "/api/favored",
+                    body=payload,
+                    headers={"Content-Type": "application/json", "Origin": origin},
+                )
+
+        self.assertEqual(health.status, HTTPStatus.OK)
+        self.assertTrue(health_body["ok"])
+        self.assertIn("default-src 'self'", health.getheader(
+            "Content-Security-Policy"
+        ))
+        self.assertEqual(health.getheader("X-Frame-Options"), "DENY")
+        self.assertEqual(missing_origin.status, HTTPStatus.FORBIDDEN)
+        self.assertEqual(wrong_type.status, HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
+        self.assertEqual(accepted.status, HTTPStatus.OK)
+        self.assertTrue(accepted_body["ok"])
 
     def test_normalize_db_path_preserves_sqlite_uri(self) -> None:
         uri = "file:///tmp/entries.db?mode=ro"
@@ -155,6 +248,17 @@ class ServeMutationEndpointTests(unittest.TestCase):
 
             self.assertEqual(harness.status, HTTPStatus.BAD_REQUEST)
 
+    def test_entries_endpoint_rejects_oversized_query(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            harness = HandlerHarness(
+                db_path=Path(td) / "entries.db",
+                payload=None,
+            )
+
+            harness._handle_entries(f"q={'x' * 501}")
+
+            self.assertEqual(harness.status, HTTPStatus.BAD_REQUEST)
+
     def test_favored_endpoint_rejects_invalid_flag(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "entries.db"
@@ -188,6 +292,25 @@ class ServeMutationEndpointTests(unittest.TestCase):
                     "favored": 1.9,
                     "expected_favored": 0,
                     "expected_revision": 0,
+                },
+            )
+
+            harness._handle_favored()
+
+            self.assertEqual(harness.status, HTTPStatus.BAD_REQUEST)
+
+    def test_favored_endpoint_rejects_oversized_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "entries.db"
+            _seed_entry(db_path)
+            harness = HandlerHarness(
+                db_path=db_path,
+                payload={
+                    "srce_ty": "arXiv",
+                    "srce_id": "2601.00001",
+                    "favored": 1,
+                    "expected_favored": 0,
+                    "expected_revision": 2 ** 63,
                 },
             )
 

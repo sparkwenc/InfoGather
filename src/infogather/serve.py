@@ -1,9 +1,14 @@
-from .storage import InfoStorage
+from .storage import (
+    InfoStorage,
+    MAX_SOURCE_ID_LENGTH,
+    MAX_SOURCE_TYPE_LENGTH,
+)
 from .paths import DEFAULT_CONFIG_PATH, DEFAULT_DB_PATH, WEB_DIR
 from .ingestion import run_ingestion
 
 import argparse
 import base64
+import ipaddress
 import json
 import secrets
 import threading
@@ -28,6 +33,10 @@ REMOVE_UNDO_LOCK = threading.Lock()
 REMOVE_UNDO = {"token": None, "entry": None}
 MAX_JSON_BODY_BYTES = 64 * 1024
 MAX_CURSOR_BYTES = 16_384
+MAX_QUERY_FIELDS = 200
+MAX_QUERY_TEXT_LENGTH = 500
+MAX_SELECTED_TAGS = 100
+MAX_TAG_LENGTH = 256
 SQLITE_INT_MIN = -(2 ** 63)
 SQLITE_INT_MAX = 2 ** 63 - 1
 
@@ -54,7 +63,11 @@ def _parse_selectors(values: list[str]) -> set[str]:
             if selector.startswith("tag:"):
                 tag = selector[4:].strip()
                 if tag:
+                    if len(tag) > MAX_TAG_LENGTH:
+                        raise ValueError("tag selector is too long")
                     tag_values.add(tag)
+                    if len(tag_values) > MAX_SELECTED_TAGS:
+                        raise ValueError("too many tag selectors")
                 continue
     return tag_values
 
@@ -104,6 +117,9 @@ def _entry_query_options(query: dict[str, list[str]]) -> dict:
         query.get("updated_within_week", [""])[0]
     )
     selected_tags = _parse_selectors(query.get("selectors", []))
+    query_text = query.get("q", [""])[0].strip()
+    if len(query_text) > MAX_QUERY_TEXT_LENGTH:
+        raise ValueError("query is too long")
     now = datetime.now(timezone.utc)
     window = None
     if updated_within_day:
@@ -124,7 +140,7 @@ def _entry_query_options(query: dict[str, list[str]]) -> dict:
             query.get("version_is_not_1", [""])[0]
         ),
         "selected_tags": selected_tags,
-        "query_text": query.get("q", [""])[0].strip(),
+        "query_text": query_text,
     }
 
 
@@ -214,6 +230,15 @@ def _normalize_db_path(raw_path: str) -> str | Path:
     return Path(raw_path).expanduser().resolve()
 
 
+def _is_loopback_host(host: str) -> bool:
+    if host.strip().casefold() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
 class InfoHandler(SimpleHTTPRequestHandler):
     def __init__(
         self,
@@ -233,7 +258,21 @@ class InfoHandler(SimpleHTTPRequestHandler):
         else:
             self.send_header("Cache-Control", "no-cache")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Referrer-Policy", "same-origin")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        self.send_header(
+            "Permissions-Policy",
+            "camera=(), microphone=(), geolocation=()",
+        )
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self'; style-src 'self'; "
+            "style-src-attr 'unsafe-inline'; font-src 'self'; "
+            "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
+            "base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+        )
         super().end_headers()
 
     def do_GET(self) -> None:
@@ -255,6 +294,18 @@ class InfoHandler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self) -> None:
+        if not self._request_is_same_origin():
+            self._write_json(
+                {"error": "same-origin request required"},
+                status=HTTPStatus.FORBIDDEN,
+            )
+            return
+        if self.headers.get_content_type() != "application/json":
+            self._write_json(
+                {"error": "Content-Type must be application/json"},
+                status=HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+            )
+            return
         parsed = urlparse(self.path)
         if parsed.path == "/api/ins/run":
             self._handle_ins_run()
@@ -276,19 +327,32 @@ class InfoHandler(SimpleHTTPRequestHandler):
             status=HTTPStatus.NOT_FOUND,
         )
 
+    def _request_is_same_origin(self) -> bool:
+        host = self.headers.get("Host", "")
+        origin = urlparse(self.headers.get("Origin", ""))
+        return (
+            bool(host)
+            and origin.scheme == "http"
+            and origin.netloc == host
+            and not origin.path
+            and not origin.params
+            and not origin.query
+            and not origin.fragment
+        )
+
     def _handle_entries(self, raw_query: str) -> None:
-        query = parse_qs(raw_query)
-        limit = _parse_int(query.get("limit", ["30"])[
-                           0], 30, min_value=1, max_value=200)
         try:
+            query = parse_qs(raw_query, max_num_fields=MAX_QUERY_FIELDS)
+            limit = _parse_int(query.get("limit", ["30"])[
+                               0], 30, min_value=1, max_value=200)
             cursor = _decode_cursor(query.get("cursor", [""])[0])
+            options = _entry_query_options(query)
         except ValueError as exc:
             self._write_json(
                 {"error": str(exc)},
                 status=HTTPStatus.BAD_REQUEST,
             )
             return
-        options = _entry_query_options(query)
         include_total = _parse_flag(query.get("include_total", ["1"])[0])
 
         try:
@@ -317,8 +381,15 @@ class InfoHandler(SimpleHTTPRequestHandler):
         )
 
     def _handle_tag_tree(self, raw_query: str) -> None:
-        query = parse_qs(raw_query)
-        options = _entry_query_options(query)
+        try:
+            query = parse_qs(raw_query, max_num_fields=MAX_QUERY_FIELDS)
+            options = _entry_query_options(query)
+        except ValueError as exc:
+            self._write_json(
+                {"error": str(exc)},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
 
         try:
             configured_groups = _load_configured_sources(self._conf_path)
@@ -402,6 +473,11 @@ class InfoHandler(SimpleHTTPRequestHandler):
     def _source_key_from_payload(payload: dict) -> tuple[str, str]:
         srce_ty = str(payload.get("srce_ty", "")).strip()
         srce_id = str(payload.get("srce_id", "")).strip()
+        if (
+            len(srce_ty) > MAX_SOURCE_TYPE_LENGTH
+            or len(srce_id) > MAX_SOURCE_ID_LENGTH
+        ):
+            return "", ""
         return srce_ty, srce_id
 
     @staticmethod
@@ -420,7 +496,7 @@ class InfoHandler(SimpleHTTPRequestHandler):
         revision = payload.get("expected_revision")
         if isinstance(revision, bool) or not isinstance(revision, int):
             return None
-        return revision if revision >= 0 else None
+        return revision if 0 <= revision <= SQLITE_INT_MAX else None
 
     def _handle_entry_mutation(
         self,
@@ -708,6 +784,8 @@ def main() -> int:
     parser.add_argument("--db-path", default=str(DEFAULT_DB_PATH))
     parser.add_argument("--conf", default=str(DEFAULT_CONFIG_PATH))
     args = parser.parse_args()
+    if not _is_loopback_host(args.host):
+        parser.error("--host must be a loopback address or localhost")
 
     db_path = _normalize_db_path(args.db_path)
     conf_path = Path(args.conf).expanduser().resolve()

@@ -31,7 +31,11 @@ async function getInsStatus() {
 async function runIns() {
   const { payload } = await requestJson(
     "/api/ins/run",
-    { method: "POST" },
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}"
+    },
     { allowStatuses: [409] }
   );
   return payload;
