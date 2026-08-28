@@ -1,6 +1,7 @@
 import time
 import http.client
 import feedparser
+import json
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -20,17 +21,31 @@ class _TextExtractor(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
+        self.skip_depth = 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if self.skip_depth:
+            self.skip_depth += 1
+            return
+        if tag == "mml:math":
+            alt_text = dict(attrs).get("alttext")
+            if alt_text:
+                self.parts.append(f" {alt_text} ")
+            self.skip_depth = 1
+            return
         if tag in {"br", "div", "li", "p"}:
             self.parts.append(" ")
 
     def handle_endtag(self, tag: str) -> None:
+        if self.skip_depth:
+            self.skip_depth -= 1
+            return
         if tag in {"div", "li", "p"}:
             self.parts.append(" ")
 
     def handle_data(self, data: str) -> None:
-        self.parts.append(data)
+        if not self.skip_depth:
+            self.parts.append(data)
 
 
 def _extract_arxiv_tag(url: str) -> str | None:
@@ -77,6 +92,11 @@ def configured_sources(conf: dict) -> list[dict]:
                 "name": name,
                 "url": url,
                 "selector_value": selector,
+                **{
+                    field: str(item[field]).strip()
+                    for field in ("fallback_url", "metadata_url")
+                    if str(item.get(field, "")).strip()
+                },
             })
     return sources
 
@@ -160,9 +180,8 @@ class InfoSources:
         ) as executor:
             futures = {
                 executor.submit(
-                    self._fetch_feed,
-                    source["url"],
-                    source["name"],
+                    self._fetch_source,
+                    source,
                     state,
                 ): (index, source)
                 for index, source, state in pending
@@ -173,14 +192,18 @@ class InfoSources:
                 url = source["url"]
                 completed += 1
                 try:
-                    feed, state_update = future.result()
+                    feed, state_update, metadata = future.result()
                     state_updates[url] = state_update
                     if feed is None:
                         cached += 1
                         print(f"SOURCE {completed}/{total}: not modified {name}")
                         continue
                     count = len(feed.get("entries", []))
-                    feeds[index] = {"source": source, "feed": feed}
+                    feeds[index] = {
+                        "source": source,
+                        "feed": feed,
+                        "metadata": metadata,
+                    }
                     total_entries += count
                     print(f"SOURCE {completed}/{total}: {count:3d} from {name}")
                 except Exception as exc:
@@ -196,6 +219,48 @@ class InfoSources:
         if failed == total and not cached:
             raise RuntimeError("all configured feeds failed")
         return [feeds[index] for index in sorted(feeds)], state_updates
+
+    def _fetch_source(
+        self,
+        source: dict,
+        state: dict,
+    ) -> tuple[dict | None, dict, dict | None]:
+        fallback_url = source.get("fallback_url")
+        try:
+            feed, state_update = self._fetch_feed(
+                source["url"],
+                source["name"],
+                state,
+                attempts=1 if fallback_url else 2,
+            )
+        except Exception as exc:
+            if not fallback_url:
+                raise
+            print(f"      {source['name']}: primary failed ({exc}), using fallback")
+            feed, state_update = self._fetch_feed(
+                fallback_url,
+                f"{source['name']} fallback",
+                attempts=2,
+            )
+            state_update["etag"] = None
+            state_update["last_modified"] = None
+            state_update["next_fetch_at"] = max(
+                state_update["next_fetch_at"],
+                time.time() + 1800,
+            )
+
+        metadata = None
+        metadata_url = source.get("metadata_url")
+        if feed is not None and metadata_url:
+            try:
+                metadata, _ = self._fetch_feed(
+                    metadata_url,
+                    f"{source['name']} metadata",
+                    attempts=1,
+                )
+            except Exception as exc:
+                print(f"      {source['name']}: metadata unavailable ({exc})")
+        return feed, state_update, metadata
 
     @staticmethod
     def _fetch_feed(
@@ -259,13 +324,22 @@ class InfoSources:
                 time.sleep(wait)
                 continue
 
-            feed = feedparser.parse(
-                response_content,
-                response_headers={
-                    str(key).lower(): value
-                    for key, value in response_headers.items()
-                },
-            )
+            normalized_headers = {
+                str(key).lower(): value
+                for key, value in response_headers.items()
+            }
+            if "json" in str(normalized_headers.get("content-type", "")).lower():
+                try:
+                    feed = InfoSources._crossref_feed(
+                        json.loads(response_content)
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    feed = {"bozo": True, "bozo_exception": exc, "entries": []}
+            else:
+                feed = feedparser.parse(
+                    response_content,
+                    response_headers=normalized_headers,
+                )
             if feed.get("bozo"):
                 detail = feed.get("bozo_exception", "parse error")
                 if attempt < attempts:
@@ -279,6 +353,58 @@ class InfoSources:
             return feed, state_update
 
         raise RuntimeError("unreachable feed fetch state")
+
+    @staticmethod
+    def _crossref_feed(payload: object) -> dict:
+        if not isinstance(payload, dict):
+            raise ValueError("Crossref response must be an object")
+        message = payload.get("message")
+        if not isinstance(message, dict) or not isinstance(message.get("items"), list):
+            raise ValueError("Crossref response has no works")
+
+        entries = []
+        for work in message["items"]:
+            if not isinstance(work, dict):
+                continue
+            titles = work.get("title", [])
+            title = titles[0] if isinstance(titles, list) and titles else titles
+            authors = []
+            for author in work.get("author", []) or []:
+                if not isinstance(author, dict):
+                    continue
+                name = " ".join(
+                    str(author.get(part, "")).strip()
+                    for part in ("given", "family")
+                    if str(author.get(part, "")).strip()
+                )
+                if name:
+                    authors.append(name)
+            resource = work.get("resource", {})
+            if not isinstance(resource, dict):
+                resource = {}
+            primary = resource.get("primary", {})
+            if not isinstance(primary, dict):
+                primary = {}
+            entry = {
+                "id": str(work.get("DOI") or ""),
+                "link": primary.get("URL") or work.get("URL"),
+                "title": str(title or ""),
+                "author": ", ".join(authors),
+                "summary": str(work.get("abstract") or ""),
+                "crossref": True,
+            }
+            published = work.get("published", {})
+            if not isinstance(published, dict):
+                published = {}
+            date_parts = published.get("date-parts", [])
+            if date_parts and isinstance(date_parts[0], list):
+                try:
+                    parts = [*date_parts[0], 1, 1][:3]
+                    entry["published_parsed"] = datetime(*parts).timetuple()
+                except (TypeError, ValueError, OverflowError):
+                    pass
+            entries.append(entry)
+        return {"feed": {}, "entries": entries}
 
     @staticmethod
     def _read_feed_response(
@@ -468,6 +594,18 @@ class InfoSources:
         for item in feeds:
             source = item["source"]
             feed = item["feed"]
+            metadata_by_id = {}
+            metadata_by_title = {}
+            metadata = item.get("metadata") or {}
+            for value in metadata.get("entries", []):
+                if not isinstance(value, dict):
+                    continue
+                raw_id = str(value.get("id") or "").strip().casefold()
+                title = self._plain_text(value.get("title")).casefold()
+                if raw_id:
+                    metadata_by_id[raw_id] = value
+                if title:
+                    metadata_by_title[title] = value
             feed_dt = self._parsed_iso(feed.get("feed", {}))
             feed_dt = feed_dt or datetime.now(timezone.utc).isoformat()
             source_url = urlparse(source["url"])
@@ -477,6 +615,11 @@ class InfoSources:
                 if not isinstance(raw_id, str) or not raw_id.strip():
                     print(f"{source['name']}: entry without ID or link skipped")
                     continue
+                title = self._plain_text(entry.get("title"))
+                extra = (
+                    metadata_by_id.get(raw_id.strip().casefold())
+                    or metadata_by_title.get(title.casefold())
+                )
 
                 author = str(entry.get("author") or "").strip()
                 if not author:
@@ -496,13 +639,26 @@ class InfoSources:
                     if len(parts) == 2:
                         author = self._plain_text(parts[0])
                         summary = parts[1]
-                if source_url.hostname == "annals.math.princeton.edu":
+                if (
+                    source_url.hostname == "annals.math.princeton.edu"
+                    and not entry.get("crossref")
+                ):
                     # The feed's dc:creator is a WordPress editor, not the paper author.
                     author = ""
 
                 content = entry.get("content", []) or []
                 if content and isinstance(content[0], dict):
                     summary = str(content[0].get("value") or summary)
+                if extra:
+                    author = author or str(extra.get("author") or "").strip()
+                    if (
+                        extra.get("summary")
+                        and (
+                            not summary.strip()
+                            or source_url.hostname in {"ams.org", "www.ams.org"}
+                        )
+                    ):
+                        summary = str(extra["summary"])
                 tags = []
                 for tag in entry.get("tags", []) or []:
                     if not isinstance(tag, dict):
@@ -521,7 +677,7 @@ class InfoSources:
                     "updated": self._parsed_iso(entry) or feed_dt,
                     "content": {
                         "link": entry.get("link"),
-                        "titl": self._plain_text(entry.get("title")),
+                        "titl": title,
                         "auth": author,
                         "abst": self._plain_text(summary),
                         "source": source["name"],

@@ -1,4 +1,5 @@
 import io
+import json
 import unittest
 import time
 import feedparser
@@ -133,6 +134,87 @@ class InfoSourcesTests(unittest.TestCase):
 
         self.assertEqual(feed["entries"][0]["id"], "result-1")
 
+    def test_fetch_feed_parses_crossref_json(self) -> None:
+        body = json.dumps({
+            "message": {
+                "items": [{
+                    "DOI": "10.4007/annals.2026.204.1.1",
+                    "title": ["Crossref result"],
+                    "author": [
+                        {"given": "Jane", "family": "Doe"},
+                        {"given": "John", "family": "Doe"},
+                    ],
+                    "published": {"date-parts": [[2026, 7, 1]]},
+                    "abstract": "<jats:p>Full abstract.</jats:p>",
+                    "resource": {"primary": {"URL": "https://projecteuclid.org/result"}},
+                }],
+            },
+        }).encode()
+        response = Response(body, headers={"Content-Type": "application/json"})
+
+        with patch("infogather.sources.urlopen", return_value=response):
+            feed, _ = InfoSources._fetch_feed(
+                "https://api.crossref.org/journals/0003-486X/works",
+                "Annals fallback",
+                attempts=1,
+            )
+
+        self.assertEqual(feed["entries"][0]["author"], "Jane Doe, John Doe")
+        self.assertEqual(
+            feed["entries"][0]["link"],
+            "https://projecteuclid.org/result",
+        )
+        entries = InfoSources({})._normalized_rss([{
+            "source": {
+                "srce_ty": "Journals",
+                "key": "annals",
+                "name": "Annals of Mathematics",
+                "url": "https://annals.math.princeton.edu/feed",
+                "selector_value": "source:Journals:annals",
+            },
+            "feed": feed,
+        }])
+        self.assertEqual(entries[0]["content"]["auth"], "Jane Doe, John Doe")
+        self.assertEqual(entries[0]["content"]["abst"], "Full abstract.")
+
+    def test_fetch_source_falls_back_after_primary_timeout(self) -> None:
+        source = InfoSources({})
+        fallback_feed = {"feed": {}, "entries": []}
+        fallback_state = {
+            "etag": "fallback",
+            "last_modified": "today",
+            "next_fetch_at": 0,
+        }
+        before = time.time()
+
+        with (
+            patch.object(
+                source,
+                "_fetch_feed",
+                side_effect=[
+                    TimeoutError("handshake timed out"),
+                    (fallback_feed, fallback_state),
+                ],
+            ) as fetch,
+            patch("builtins.print"),
+        ):
+            feed, state, metadata = source._fetch_source(
+                {
+                    "name": "Annals of Mathematics",
+                    "url": "https://annals.math.princeton.edu/feed",
+                    "fallback_url": "https://api.crossref.org/annals",
+                },
+                {"etag": "primary"},
+            )
+
+        self.assertIs(feed, fallback_feed)
+        self.assertIsNone(metadata)
+        self.assertIsNone(state["etag"])
+        self.assertIsNone(state["last_modified"])
+        self.assertGreaterEqual(state["next_fetch_at"], before + 1799)
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(fetch.call_args_list[0].kwargs["attempts"], 1)
+
     def test_fetch_feed_uses_conditional_etag(self) -> None:
         not_modified = HTTPError(
             "https://rss.arxiv.org/rss/math.NT",
@@ -186,7 +268,7 @@ class InfoSourcesTests(unittest.TestCase):
             ],
         })
 
-        def fetch(url, name, _state):
+        def fetch(url, name, _state, attempts=2):
             if name == "bad":
                 raise RuntimeError("failed")
             return {"name": name, "entries": []}, {"etag": name}
@@ -274,6 +356,17 @@ class InfoSourcesTests(unittest.TestCase):
                     "selector_value": "source:Journals:jams",
                 },
                 "feed": journal,
+                "metadata": {
+                    "entries": [{
+                        "id": "10.1090/jams/1072",
+                        "title": "Journal result",
+                        "author": "Jane Doe, John Doe",
+                        "summary": (
+                            "<jats:p>Actual <mml:math alttext=\"x squared\">"
+                            "<mml:mi>x</mml:mi></mml:math> abstract.</jats:p>"
+                        ),
+                    }],
+                },
             },
         ]
         source = InfoSources({})
@@ -288,7 +381,7 @@ class InfoSourcesTests(unittest.TestCase):
         self.assertEqual(entries[1]["srce_id"], "jams:abc123")
         self.assertEqual(entries[1]["version"], 1)
         self.assertEqual(entries[1]["content"]["auth"], "Jane Doe and John Doe")
-        self.assertEqual(entries[1]["content"]["abst"], "JAMS 39, 1-20.")
+        self.assertEqual(entries[1]["content"]["abst"], "Actual x squared abstract.")
         self.assertEqual(
             entries[1]["content"]["tags"],
             ["source:Journals:jams"],
@@ -333,6 +426,37 @@ class InfoSourcesTests(unittest.TestCase):
             entries[0]["content"]["tags"],
             ["To appear", "source:Journals:annals"],
         )
+
+    def test_generic_rss_fills_missing_author_from_doi_metadata(self) -> None:
+        source = InfoSources({})
+        entries = source._normalized_rss([{
+            "source": {
+                "srce_ty": "Journals",
+                "key": "inventiones",
+                "name": "Inventiones mathematicae",
+                "url": "https://link.springer.com/search.rss",
+                "selector_value": "source:Journals:inventiones",
+            },
+            "feed": {
+                "feed": {},
+                "entries": [{
+                    "id": "10.1007/example",
+                    "title": "Inventiones result",
+                    "summary": "Existing abstract.",
+                }],
+            },
+            "metadata": {
+                "entries": [{
+                    "id": "10.1007/example",
+                    "title": "Inventiones result",
+                    "author": "Jane Doe, John Doe",
+                    "summary": "Metadata abstract.",
+                }],
+            },
+        }])
+
+        self.assertEqual(entries[0]["content"]["auth"], "Jane Doe, John Doe")
+        self.assertEqual(entries[0]["content"]["abst"], "Existing abstract.")
 
     def test_deduplicate_entries_keeps_newest_and_merges_tags(self) -> None:
         first = {
