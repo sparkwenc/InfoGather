@@ -291,7 +291,7 @@ class InfoHandler(SimpleHTTPRequestHandler):
         include_total = _parse_flag(query.get("include_total", ["1"])[0])
 
         try:
-            with InfoStorage(str(self._db_path)) as storage:
+            with InfoStorage.open_current(str(self._db_path)) as storage:
                 result = storage.query_entries(
                     **options,
                     limit=limit,
@@ -333,7 +333,7 @@ class InfoHandler(SimpleHTTPRequestHandler):
                 }
                 for group in configured_groups
             ]
-            with InfoStorage(str(self._db_path)) as storage:
+            with InfoStorage.open_current(str(self._db_path)) as storage:
                 facets = storage.query_facets(
                     configured_tags=configured_tags,
                     groups=group_selectors,
@@ -441,7 +441,7 @@ class InfoHandler(SimpleHTTPRequestHandler):
             return
 
         try:
-            with InfoStorage(str(self._db_path)) as storage:
+            with InfoStorage.open_current(str(self._db_path)) as storage:
                 changed = action(storage, srce_ty, srce_id)
         except Exception as exc:
             self._write_json(
@@ -578,7 +578,7 @@ class InfoHandler(SimpleHTTPRequestHandler):
 
         try:
             with REMOVE_UNDO_LOCK:
-                with InfoStorage(str(self._db_path)) as storage:
+                with InfoStorage.open_current(str(self._db_path)) as storage:
                     entry = storage.pop_entry(
                         srce_ty,
                         srce_id,
@@ -634,7 +634,7 @@ class InfoHandler(SimpleHTTPRequestHandler):
                 if REMOVE_UNDO["token"] != token or not isinstance(entry, dict):
                     entry = None
                 else:
-                    with InfoStorage(str(self._db_path)) as storage:
+                    with InfoStorage.open_current(str(self._db_path)) as storage:
                         restored = storage.restore_entry(entry)
                     REMOVE_UNDO["token"] = None
                     REMOVE_UNDO["entry"] = None

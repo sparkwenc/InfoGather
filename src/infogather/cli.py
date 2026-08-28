@@ -21,7 +21,7 @@ def _cmd_ins(args: argparse.Namespace) -> int:
 
 
 def _cmd_fav(args: argparse.Namespace) -> int:
-    with InfoStorage(args.db_path) as storage:
+    with InfoStorage.open_current(args.db_path) as storage:
         for srce_id in args.id:
             stat = storage.favor_entry(args.ty, srce_id, args.fav)
             print(
@@ -30,7 +30,7 @@ def _cmd_fav(args: argparse.Namespace) -> int:
 
 
 def _cmd_exp(args: argparse.Namespace) -> int:
-    with InfoStorage(args.db_path) as storage:
+    with InfoStorage.open_current(args.db_path) as storage:
         fn = getattr(filters, args.filter, None)
         if fn is None or not callable(fn):
             raise ValueError(f"unknown filter function: {args.filter}")

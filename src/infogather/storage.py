@@ -1,4 +1,5 @@
 import json
+import math
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -7,21 +8,34 @@ from typing import Callable
 from .filters import parse_updated
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 BUSY_TIMEOUT_MS = 10_000
+SQLITE_INT_MAX = 2 ** 63 - 1
+MAX_SOURCE_TYPE_LENGTH = 512
+MAX_SOURCE_ID_LENGTH = 4096
 
 
 class InfoStorage:
     # resource management
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(
+        self,
+        db_path: str | Path,
+        *,
+        _initialize: bool = True,
+    ) -> None:
         raw_path = str(db_path)
         is_uri = raw_path.startswith("file:")
         self._read_only = is_uri and "mode=ro" in raw_path
         if raw_path == ":memory:" or is_uri:
             resolved_path = raw_path
-        else:
+        elif _initialize:
             path = Path(raw_path).expanduser()
             path.parent.mkdir(parents=True, exist_ok=True)
+            resolved_path = str(path)
+        else:
+            path = Path(raw_path).expanduser()
+            if not path.is_file():
+                raise FileNotFoundError(f"database does not exist: {path}")
             resolved_path = str(path)
         self._db_path = resolved_path
         self._conn = sqlite3.connect(
@@ -31,11 +45,29 @@ class InfoStorage:
         )
         self._conn.row_factory = sqlite3.Row
         try:
-            self._configure_connection(raw_path)
-            self._init_schema()
+            schema_version = self._schema_version()
+            if schema_version > SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"database schema version {schema_version} is newer than "
+                    f"supported version {SCHEMA_VERSION}"
+                )
+            self._configure_connection(raw_path, initialize=_initialize)
+            if _initialize:
+                self._init_schema(schema_version)
+            elif schema_version != SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"database schema version {schema_version} requires "
+                    f"migration to version {SCHEMA_VERSION}"
+                )
         except Exception:
             self.close()
             raise
+
+    @classmethod
+    def open_current(cls, db_path: str | Path) -> "InfoStorage":
+        """Open an existing current-schema database without migrating it."""
+
+        return cls(db_path, _initialize=False)
 
     def close(self) -> None:
         if self._conn is None:
@@ -55,7 +87,7 @@ class InfoStorage:
         self,
         entries: list[dict],
         feed_states: dict[str, dict] | None = None,
-    ) -> None:
+    ) -> int:
         """Insert entries."""
 
         tot_cnt = len(entries)
@@ -70,6 +102,7 @@ class InfoStorage:
 
         print(
             f"Insert result: {changed_cnt}/{tot_cnt} inserted or updated")
+        return changed_cnt
 
     def get_feed_states(self) -> dict[str, dict]:
         with self._get_conn() as conn:
@@ -94,11 +127,14 @@ class InfoStorage:
     def favor_entry(self, srce_ty: str, srce_id: str, favored: int) -> int:
         """Update favored status for one entry"""
 
+        if favored not in (0, 1):
+            raise ValueError("favored must be 0 or 1")
         with self._get_conn() as conn:
             cur = conn.execute(
                 "UPDATE tab_entries SET favored = ?, state_rev = state_rev + 1 "
-                "WHERE srce_ty = ? AND srce_id = ?",
-                (favored, srce_ty, srce_id),
+                "WHERE srce_ty = ? AND srce_id = ? AND favored <> ? "
+                "AND state_rev < ?",
+                (favored, srce_ty, srce_id, favored, SQLITE_INT_MAX),
             )
         return cur.rowcount
 
@@ -158,15 +194,19 @@ class InfoStorage:
     def restore_entry(self, entry: dict) -> int:
         """Restore a removed entry unless it has already been reinserted."""
 
+        prepared = self._prepare_entry(entry)
+        state_rev = int(entry["state_rev"])
+        if not 0 <= state_rev <= SQLITE_INT_MAX:
+            raise ValueError("state revision is outside SQLite integer range")
         return self._restore_row(
-            entry["srce_ty"],
-            entry["srce_id"],
-            entry["version"],
-            entry["favored"],
-            entry["noticed"],
-            entry["state_rev"],
-            entry["updated"],
-            entry["content"],
+            prepared["srce_ty"],
+            prepared["srce_id"],
+            prepared["version"],
+            prepared["favored"],
+            prepared["noticed"],
+            state_rev,
+            prepared["updated"],
+            prepared["content"],
         )
 
     def export_entries(
@@ -235,6 +275,8 @@ class InfoStorage:
     ) -> dict:
         """Return one stable, database-filtered page of entries."""
 
+        if not 1 <= limit <= 10_000:
+            raise ValueError("limit must be between 1 and 10000")
         where, params = self._entry_filter_sql(
             favored=favored,
             unnoticed=unnoticed,
@@ -367,14 +409,18 @@ class InfoStorage:
             raise RuntimeError("InfoStorage is closed.")
         return self._conn
 
-    def _configure_connection(self, raw_path: str) -> None:
+    def _schema_version(self) -> int:
+        return int(self._get_conn().execute("PRAGMA user_version").fetchone()[0])
+
+    def _configure_connection(self, raw_path: str, *, initialize: bool) -> None:
         conn = self._get_conn()
         conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
         conn.execute("PRAGMA foreign_keys = ON")
         if self._read_only:
             return
-        if raw_path != ":memory:" and "mode=memory" not in raw_path:
+        if initialize and raw_path != ":memory:" and "mode=memory" not in raw_path:
             conn.execute("PRAGMA journal_mode = WAL")
+        if raw_path != ":memory:" and "mode=memory" not in raw_path:
             conn.execute("PRAGMA synchronous = NORMAL")
 
     @staticmethod
@@ -398,12 +444,25 @@ class InfoStorage:
         updated_at_us = cls._updated_at_us(updated)
         if not srce_ty or not srce_id:
             raise ValueError("entry source type and ID are required")
-        if version < 1:
+        if len(srce_ty) > MAX_SOURCE_TYPE_LENGTH:
+            raise ValueError("entry source type is too long")
+        if len(srce_id) > MAX_SOURCE_ID_LENGTH:
+            raise ValueError("entry source ID is too long")
+        if not 1 <= version <= SQLITE_INT_MAX:
             raise ValueError("entry version must be at least 1")
         if favored not in (0, 1) or noticed not in (0, 1):
             raise ValueError("entry flags must be 0 or 1")
         if parse_updated(updated) is None:
             raise ValueError("entry updated timestamp must be ISO 8601")
+        tags = content.get("tags", [])
+        if not isinstance(tags, list) or any(
+            not isinstance(tag, str) for tag in tags
+        ):
+            raise TypeError("entry tags must be a list of strings")
+        content = dict(content)
+        content["tags"] = list(dict.fromkeys(
+            tag.strip() for tag in tags if tag.strip()
+        ))
         return {
             "srce_ty": srce_ty,
             "srce_id": srce_id,
@@ -419,6 +478,20 @@ class InfoStorage:
     def _update_feed_states(self, states: dict[str, dict]) -> None:
         if not states:
             return
+        values = []
+        for url, state in states.items():
+            url = str(url).strip()
+            next_fetch_at = float(state.get("next_fetch_at", 0) or 0)
+            if not url:
+                raise ValueError("feed URL is required")
+            if not math.isfinite(next_fetch_at) or next_fetch_at < 0:
+                raise ValueError("next fetch time must be finite and non-negative")
+            values.append((
+                url,
+                state.get("etag"),
+                state.get("last_modified"),
+                next_fetch_at,
+            ))
         self._get_conn().executemany(
             """
             INSERT INTO tab_feed_state (
@@ -429,51 +502,12 @@ class InfoStorage:
                 last_modified = excluded.last_modified,
                 next_fetch_at = excluded.next_fetch_at
             """,
-            [
-                (
-                    url,
-                    state.get("etag"),
-                    state.get("last_modified"),
-                    float(state.get("next_fetch_at", 0) or 0),
-                )
-                for url, state in states.items()
-            ],
+            values,
         )
 
-    def _init_schema(self) -> None:
+    def _init_schema(self, schema_version: int) -> None:
         conn = self._get_conn()
-        required_indexes = {
-            "idx_entries_identity",
-            "idx_entries_page",
-            "idx_entries_favored_page",
-        }
-        columns = {
-            row["name"] for row in conn.execute("PRAGMA table_info(tab_entries)")
-        }
-        indexes = {
-            row["name"]
-            for row in conn.execute("PRAGMA index_list(tab_entries)")
-        }
-        feed_state_info = list(conn.execute("PRAGMA table_info(tab_feed_state)"))
-        feed_state_columns = {row["name"] for row in feed_state_info}
-        feed_state_primary_key = [
-            row["name"]
-            for row in sorted(feed_state_info, key=lambda row: int(row["pk"]))
-            if int(row["pk"]) > 0
-        ]
-        feed_state_url_is_key = feed_state_primary_key == ["url"]
-        has_feed_state = {
-            "url", "etag", "last_modified", "next_fetch_at"
-        }.issubset(feed_state_columns) and feed_state_url_is_key
-        schema_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-        entries_ready = {
-            "srce_ty", "srce_id", "noticed", "state_rev", "updated_at_us"
-        }.issubset(columns) and required_indexes.issubset(indexes)
-        if (
-            schema_version >= SCHEMA_VERSION
-            and entries_ready
-            and has_feed_state
-        ):
+        if schema_version == SCHEMA_VERSION:
             return
 
         if self._read_only:
@@ -484,121 +518,171 @@ class InfoStorage:
 
         with conn:
             conn.execute("BEGIN IMMEDIATE")
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS tab_entries (
-                    srce_ty TEXT NOT NULL,
-                    srce_id TEXT NOT NULL,
-                    version INTEGER NOT NULL DEFAULT 1,
-                    favored INTEGER NOT NULL DEFAULT 0,
-                    noticed INTEGER NOT NULL DEFAULT 0,
-                    state_rev INTEGER NOT NULL DEFAULT 0,
-                    updated TEXT NOT NULL,
-                    updated_at_us INTEGER NOT NULL DEFAULT 0,
-                    content TEXT NOT NULL,
-                    PRIMARY KEY (srce_ty, srce_id),
-                    CHECK (version >= 1),
-                    CHECK (favored IN (0, 1)),
-                    CHECK (noticed IN (0, 1)),
-                    CHECK (state_rev >= 0),
-                    CHECK (json_valid(content) AND json_type(content) = 'object')
+            current_version = self._schema_version()
+            if current_version > SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"database schema version {current_version} is newer than "
+                    f"supported version {SCHEMA_VERSION}"
                 )
-                """
+            if current_version == SCHEMA_VERSION:
+                return
+            self._install_canonical_schema()
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def _install_canonical_schema(self) -> None:
+        conn = self._get_conn()
+        tables = {
+            row["name"]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_schema WHERE type = 'table'"
             )
+        }
+        if "tab_entries" in tables:
             columns = {
                 row["name"]
                 for row in conn.execute("PRAGMA table_info(tab_entries)")
             }
-            if "noticed" not in columns:
-                conn.execute(
-                    "ALTER TABLE tab_entries "
-                    "ADD COLUMN noticed INTEGER NOT NULL DEFAULT 0"
+            required = {
+                "srce_ty", "srce_id", "version", "favored",
+                "updated", "content",
+            }
+            missing = required - columns
+            if missing:
+                raise RuntimeError(
+                    f"cannot migrate tab_entries; missing columns: {sorted(missing)}"
                 )
-            if "state_rev" not in columns:
-                conn.execute(
-                    "ALTER TABLE tab_entries "
-                    "ADD COLUMN state_rev INTEGER NOT NULL DEFAULT 0"
-                )
-            needs_backfill = schema_version < 3
-            if "updated_at_us" not in columns:
-                conn.execute(
-                    "ALTER TABLE tab_entries "
-                    "ADD COLUMN updated_at_us INTEGER NOT NULL DEFAULT 0"
-                )
-                needs_backfill = True
-            conn.execute(
+            conn.execute("DROP TABLE IF EXISTS tab_entries_v5")
+            self._create_entries_table("tab_entries_v5")
+            noticed_sql = "noticed" if "noticed" in columns else "0 AS noticed"
+            state_rev_sql = (
+                "state_rev" if "state_rev" in columns else "0 AS state_rev"
+            )
+            cursor = conn.execute(
+                f"""
+                SELECT srce_ty, srce_id, version, favored, {noticed_sql},
+                       {state_rev_sql}, updated, content
+                FROM tab_entries
                 """
-                CREATE TABLE IF NOT EXISTS tab_feed_state (
+            )
+            while rows := cursor.fetchmany(1000):
+                values = []
+                for row in rows:
+                    identity = f"{row['srce_ty']}:{row['srce_id']}"
+                    try:
+                        content = json.loads(row["content"])
+                        prepared = self._prepare_entry({
+                            "srce_ty": row["srce_ty"],
+                            "srce_id": row["srce_id"],
+                            "version": row["version"],
+                            "favored": row["favored"],
+                            "noticed": row["noticed"],
+                            "updated": row["updated"],
+                            "content": content,
+                        })
+                        state_rev = int(row["state_rev"])
+                        if not 0 <= state_rev <= SQLITE_INT_MAX:
+                            raise ValueError("invalid state revision")
+                    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                        raise RuntimeError(
+                            f"cannot migrate entry {identity}: {exc}"
+                        ) from exc
+                    values.append((
+                        prepared["srce_ty"], prepared["srce_id"],
+                        prepared["version"], prepared["favored"],
+                        prepared["noticed"], state_rev, prepared["updated"],
+                        prepared["updated_at_us"], prepared["content_json"],
+                    ))
+                conn.executemany(
+                    """
+                    INSERT INTO tab_entries_v5 (
+                        srce_ty, srce_id, version, favored, noticed, state_rev,
+                        updated, updated_at_us, content
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    values,
+                )
+            conn.execute("DROP TABLE tab_entries")
+            conn.execute("ALTER TABLE tab_entries_v5 RENAME TO tab_entries")
+        else:
+            self._create_entries_table("tab_entries")
+
+        conn.execute("DROP TABLE IF EXISTS tab_entry_tags")
+        conn.execute("DROP TABLE IF EXISTS tab_entries_fts")
+        conn.execute("DROP TRIGGER IF EXISTS trg_entries_assign_pk")
+        self._install_feed_state_table(tables)
+        conn.execute(
+            """CREATE INDEX idx_entries_page
+            ON tab_entries(updated_at_us DESC, srce_ty, srce_id)"""
+        )
+        conn.execute(
+            """CREATE INDEX idx_entries_favored_page
+            ON tab_entries(updated_at_us DESC, srce_ty, srce_id)
+            WHERE favored = 1"""
+        )
+
+    def _create_entries_table(self, table: str) -> None:
+        self._get_conn().execute(f"""
+            CREATE TABLE {table} (
+                srce_ty TEXT NOT NULL,
+                srce_id TEXT NOT NULL,
+                version INTEGER NOT NULL DEFAULT 1,
+                favored INTEGER NOT NULL DEFAULT 0,
+                noticed INTEGER NOT NULL DEFAULT 0,
+                state_rev INTEGER NOT NULL DEFAULT 0,
+                updated TEXT NOT NULL,
+                updated_at_us INTEGER NOT NULL DEFAULT 0,
+                content TEXT NOT NULL,
+                PRIMARY KEY (srce_ty, srce_id),
+                CHECK (version >= 1),
+                CHECK (favored IN (0, 1)),
+                CHECK (noticed IN (0, 1)),
+                CHECK (state_rev >= 0),
+                CHECK (json_valid(content) AND json_type(content) = 'object')
+            )
+        """)
+
+    def _install_feed_state_table(self, tables: set[str]) -> None:
+        conn = self._get_conn()
+        if "tab_feed_state" not in tables:
+            conn.execute("""
+                CREATE TABLE tab_feed_state (
                     url TEXT PRIMARY KEY,
                     etag TEXT,
                     last_modified TEXT,
                     next_fetch_at REAL NOT NULL DEFAULT 0
                 )
-                """
+            """)
+            return
+        info = list(conn.execute("PRAGMA table_info(tab_feed_state)"))
+        columns = {row["name"] for row in info}
+        primary_key = [
+            row["name"]
+            for row in sorted(info, key=lambda row: int(row["pk"]))
+            if int(row["pk"]) > 0
+        ]
+        if "url" not in columns or primary_key != ["url"]:
+            raise RuntimeError("tab_feed_state URL must be its primary key")
+        conn.execute("DROP TABLE IF EXISTS tab_feed_state_v5")
+        conn.execute("""
+            CREATE TABLE tab_feed_state_v5 (
+                url TEXT PRIMARY KEY,
+                etag TEXT,
+                last_modified TEXT,
+                next_fetch_at REAL NOT NULL DEFAULT 0
             )
-            feed_state_info = list(
-                conn.execute("PRAGMA table_info(tab_feed_state)")
+        """)
+        etag = "etag" if "etag" in columns else "NULL"
+        modified = "last_modified" if "last_modified" in columns else "NULL"
+        next_fetch = "next_fetch_at" if "next_fetch_at" in columns else "0"
+        conn.execute(f"""
+            INSERT INTO tab_feed_state_v5 (
+                url, etag, last_modified, next_fetch_at
             )
-            feed_state_columns = {row["name"] for row in feed_state_info}
-            primary_key = [
-                row["name"]
-                for row in sorted(feed_state_info, key=lambda row: int(row["pk"]))
-                if int(row["pk"]) > 0
-            ]
-            url_is_key = primary_key == ["url"]
-            if not url_is_key:
-                raise RuntimeError("tab_feed_state URL must be its primary key")
-            for column, definition in (
-                ("etag", "TEXT"),
-                ("last_modified", "TEXT"),
-                ("next_fetch_at", "REAL NOT NULL DEFAULT 0"),
-            ):
-                if column not in feed_state_columns:
-                    conn.execute(
-                        f"ALTER TABLE tab_feed_state "
-                        f"ADD COLUMN {column} {definition}"
-                    )
-            conn.execute("DROP TABLE IF EXISTS tab_entry_tags")
-            conn.execute("DROP TABLE IF EXISTS tab_entries_fts")
-            for old_index in (
-                "idx_entries_favored",
-                "idx_entries_noticed",
-                "idx_entries_updated", "idx_entries_pk",
-            ):
-                conn.execute(f"DROP INDEX IF EXISTS {old_index}")
-            conn.execute(
-                """
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_entries_identity
-                ON tab_entries(srce_ty, srce_id)
-                """
-            )
-            conn.execute("DROP TRIGGER IF EXISTS trg_entries_assign_pk")
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_entries_page
-                ON tab_entries(updated_at_us DESC, srce_ty, srce_id)
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_entries_favored_page
-                ON tab_entries(updated_at_us DESC, srce_ty, srce_id)
-                WHERE favored = 1
-                """
-            )
-
-            if needs_backfill:
-                cursor = conn.execute(
-                    "SELECT srce_ty, srce_id, updated FROM tab_entries"
-                )
-                while rows := cursor.fetchmany(1000):
-                    conn.executemany(
-                        "UPDATE tab_entries SET updated_at_us = ? "
-                        "WHERE srce_ty = ? AND srce_id = ?",
-                        ((self._updated_at_us(row["updated"]), row["srce_ty"],
-                          row["srce_id"]) for row in rows),
-                    )
-            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            SELECT url, {etag}, {modified}, {next_fetch}
+            FROM tab_feed_state
+        """)
+        conn.execute("DROP TABLE tab_feed_state")
+        conn.execute("ALTER TABLE tab_feed_state_v5 RENAME TO tab_feed_state")
 
     def _upsert_row(
         self,
@@ -615,7 +699,7 @@ class InfoStorage:
         conn = self._get_conn()
         existing = conn.execute(
             """
-            SELECT version, updated, content
+            SELECT version, updated, updated_at_us, content
             FROM tab_entries
             WHERE srce_ty = ? AND srce_id = ?
             """,
@@ -667,6 +751,19 @@ class InfoStorage:
             )
             return 1
 
+        if updated_at_us < int(existing["updated_at_us"]):
+            if merged_tags == existing_tags:
+                return 0
+            existing_content["tags"] = merged_tags
+            conn.execute(
+                """
+                UPDATE tab_entries SET content = ?
+                WHERE srce_ty = ? AND srce_id = ?
+                """,
+                (self._encode_content(existing_content), srce_ty, srce_id),
+            )
+            return 1
+
         merged_content = dict(existing_content)
         merged_content["tags"] = merged_tags
         for key, value in content.items():
@@ -695,6 +792,7 @@ class InfoStorage:
         return json.dumps(
             content,
             ensure_ascii=False,
+            allow_nan=False,
             separators=(",", ":"),
         )
 
@@ -779,15 +877,23 @@ class InfoStorage:
     ) -> int:
         if column not in {"favored", "noticed"}:
             raise ValueError(f"unsupported flag column: {column}")
+        if expected not in (0, 1) or value not in (0, 1):
+            raise ValueError("entry flags must be 0 or 1")
+        if not 0 <= expected_revision <= SQLITE_INT_MAX:
+            raise ValueError("state revision is outside SQLite integer range")
         with self._get_conn() as conn:
             cur = conn.execute(
                 f"""
                 UPDATE tab_entries
                 SET {column} = ?, state_rev = state_rev + 1
                 WHERE srce_ty = ? AND srce_id = ?
-                    AND {column} = ? AND state_rev = ?
+                    AND {column} = ? AND state_rev = ? AND {column} <> ?
+                    AND state_rev < ?
                 """,
-                (value, srce_ty, srce_id, expected, expected_revision),
+                (
+                    value, srce_ty, srce_id, expected, expected_revision,
+                    value, SQLITE_INT_MAX,
+                ),
             )
         return cur.rowcount
 

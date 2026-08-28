@@ -6,7 +6,7 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from infogather.storage import InfoStorage
+from infogather.storage import InfoStorage, SCHEMA_VERSION
 
 
 def _entry(
@@ -90,13 +90,14 @@ class InfoStorageTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "read-only"):
                 InfoStorage(f"{db_path.as_uri()}?mode=ro")
 
-    def test_initialization_repairs_missing_index(self) -> None:
+    def test_migration_repairs_missing_index(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "entries.db"
             with InfoStorage(db_path):
                 pass
             with sqlite3.connect(db_path) as conn:
                 conn.execute("DROP INDEX idx_entries_page")
+                conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
 
             with InfoStorage(db_path):
                 pass
@@ -107,6 +108,153 @@ class InfoStorageTests(unittest.TestCase):
                     for row in conn.execute("PRAGMA index_list(tab_entries)")
                 }
             self.assertIn("idx_entries_page", indexes)
+
+    def test_current_schema_open_does_not_repair_or_create(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "entries.db"
+            with self.assertRaises(FileNotFoundError):
+                InfoStorage.open_current(db_path)
+            self.assertFalse(db_path.exists())
+
+            with InfoStorage(db_path):
+                pass
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("DROP INDEX idx_entries_page")
+            with InfoStorage(db_path):
+                pass
+            with sqlite3.connect(db_path) as conn:
+                indexes = {
+                    row[1] for row in conn.execute("PRAGMA index_list(tab_entries)")
+                }
+            self.assertNotIn("idx_entries_page", indexes)
+
+    def test_future_schema_is_rejected_without_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "entries.db"
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+
+            with self.assertRaisesRegex(RuntimeError, "newer"):
+                InfoStorage(db_path)
+
+            with sqlite3.connect(db_path) as conn:
+                self.assertEqual(
+                    conn.execute("PRAGMA user_version").fetchone()[0],
+                    SCHEMA_VERSION + 1,
+                )
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table'"
+                    ).fetchone()[0],
+                    0,
+                )
+
+    def test_migration_builds_the_same_canonical_schema_as_fresh_database(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            fresh_path = Path(td) / "fresh.db"
+            legacy_path = Path(td) / "legacy.db"
+            with InfoStorage(fresh_path):
+                pass
+            with sqlite3.connect(legacy_path) as conn:
+                conn.executescript(
+                    """
+                    CREATE TABLE tab_entries (
+                        entry_pk INTEGER UNIQUE,
+                        srce_ty TEXT NOT NULL,
+                        srce_id TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1,
+                        favored INTEGER NOT NULL DEFAULT 0,
+                        noticed INTEGER NOT NULL DEFAULT 0,
+                        state_rev INTEGER NOT NULL DEFAULT 0,
+                        updated TEXT NOT NULL,
+                        updated_at_us INTEGER NOT NULL DEFAULT 0,
+                        content TEXT NOT NULL,
+                        PRIMARY KEY (srce_ty, srce_id)
+                    );
+                    CREATE TABLE tab_entry_tags (entry_pk INTEGER, tag TEXT);
+                    CREATE TABLE tab_entries_fts (title TEXT);
+                    CREATE TABLE tab_feed_state (
+                        url TEXT PRIMARY KEY,
+                        etag TEXT,
+                        last_modified TEXT,
+                        next_fetch_at REAL NOT NULL DEFAULT 0
+                    );
+                    PRAGMA user_version = 3;
+                    """
+                )
+                entry = _entry(version=1)
+                conn.execute(
+                    """
+                    INSERT INTO tab_entries (
+                        entry_pk, srce_ty, srce_id, version, favored, noticed,
+                        state_rev, updated, updated_at_us, content
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        1, entry["srce_ty"], entry["srce_id"], entry["version"],
+                        entry["favored"], entry["noticed"], entry["state_rev"],
+                        entry["updated"], 0, json.dumps(entry["content"]),
+                    ),
+                )
+
+            with InfoStorage(legacy_path) as storage:
+                self.assertEqual(_items(storage)[0]["srce_id"], "2601.00001")
+
+            def signature(path: Path) -> tuple:
+                with sqlite3.connect(path) as conn:
+                    return (
+                        tuple(conn.execute("PRAGMA table_info(tab_entries)")),
+                        tuple(conn.execute("PRAGMA table_info(tab_feed_state)")),
+                        tuple(conn.execute("PRAGMA index_list(tab_entries)")),
+                    )
+
+            self.assertEqual(signature(legacy_path), signature(fresh_path))
+            with sqlite3.connect(legacy_path) as conn:
+                tables = {
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT name FROM sqlite_schema WHERE type = 'table'"
+                    )
+                }
+            self.assertNotIn("tab_entry_tags", tables)
+            self.assertNotIn("tab_entries_fts", tables)
+
+    def test_failed_migration_rolls_back_schema_and_version(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "entries.db"
+            with sqlite3.connect(db_path) as conn:
+                conn.executescript(
+                    """
+                    CREATE TABLE tab_entries (
+                        srce_ty TEXT NOT NULL,
+                        srce_id TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1,
+                        favored INTEGER NOT NULL DEFAULT 0,
+                        updated TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        PRIMARY KEY (srce_ty, srce_id)
+                    );
+                    INSERT INTO tab_entries VALUES (
+                        'arXiv', 'bad', 1, 0,
+                        '2026-03-01T00:00:00+00:00', 'not-json'
+                    );
+                    PRAGMA user_version = 4;
+                    """
+                )
+
+            with self.assertRaisesRegex(RuntimeError, "cannot migrate entry"):
+                InfoStorage(db_path)
+
+            with sqlite3.connect(db_path) as conn:
+                self.assertEqual(
+                    conn.execute("PRAGMA user_version").fetchone()[0], 4
+                )
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT content FROM tab_entries WHERE srce_id = 'bad'"
+                    ).fetchone()[0],
+                    "not-json",
+                )
 
     def test_feed_state_url_must_be_primary_key(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -248,12 +396,67 @@ class InfoStorageTests(unittest.TestCase):
         self.assertEqual(stored["content"]["titl"], "new title")
         self.assertEqual(stored["content"]["abst"], "corrected abstract")
 
+    def test_equal_version_older_data_only_merges_tags(self) -> None:
+        newer = _entry(
+            version=1,
+            title="new title",
+            updated="2026-03-02T00:00:00+00:00",
+        )
+        older = _entry(
+            version=1,
+            title="stale title",
+            updated="2026-03-01T00:00:00+00:00",
+            tags=["math.NT"],
+        )
+        with InfoStorage(":memory:") as storage:
+            with redirect_stdout(io.StringIO()):
+                storage.insert_entries([newer])
+                storage.insert_entries([older])
+            stored = _items(storage)[0]
+
+        self.assertEqual(stored["updated"], newer["updated"])
+        self.assertEqual(stored["content"]["titl"], "new title")
+        self.assertEqual(stored["content"]["tags"], ["math.AG", "math.NT"])
+
     def test_equal_version_unchanged_content_is_noop(self) -> None:
         with InfoStorage(":memory:") as storage:
             with redirect_stdout(io.StringIO()) as out:
                 storage.insert_entries([_entry(version=1)])
                 storage.insert_entries([_entry(version=1)])
             self.assertIn("0/1 inserted or updated", out.getvalue())
+
+    def test_storage_rejects_invalid_boundary_values(self) -> None:
+        invalid_tags = _entry(version=1)
+        invalid_tags["content"]["tags"] = "math.AG"
+        invalid_json = _entry(version=1)
+        invalid_json["content"]["score"] = float("nan")
+        with InfoStorage(":memory:") as storage:
+            with self.assertRaisesRegex(TypeError, "tags"):
+                storage.insert_entries([invalid_tags])
+            with self.assertRaisesRegex(ValueError, "JSON"):
+                storage.insert_entries([invalid_json])
+            with self.assertRaisesRegex(ValueError, "limit"):
+                storage.query_entries(limit=0)
+            with self.assertRaisesRegex(ValueError, "favored"):
+                storage.favor_entry("arXiv", "2601.00001", 2)
+            with self.assertRaisesRegex(ValueError, "finite"):
+                storage.update_feed_states({
+                    "https://example.com/feed": {"next_fetch_at": float("inf")}
+                })
+
+    def test_noop_flag_update_does_not_increment_revision(self) -> None:
+        with InfoStorage(":memory:") as storage:
+            with redirect_stdout(io.StringIO()):
+                storage.insert_entries([_entry(version=1)])
+            self.assertEqual(storage.favor_entry("arXiv", "2601.00001", 0), 0)
+            self.assertEqual(
+                storage.favor_entry_if_current(
+                    "arXiv", "2601.00001", 0, 0, 0
+                ),
+                0,
+            )
+            stored = _items(storage)[0]
+        self.assertEqual(stored["state_rev"], 0)
 
     def test_query_entries_uses_stable_cursor_and_database_filters(self) -> None:
         entries = [
