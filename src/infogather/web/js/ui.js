@@ -163,7 +163,7 @@ let cardSequence = 0;
     m1.className = "line";
     m1.textContent = [
       "作者: " + (c.auth || "-"),
-      "来源: " + (item.srce_ty || "-") + ":" + (item.srce_id || "-"),
+      "来源: " + (c.source || (item.srce_ty || "-") + ":" + (item.srce_id || "-")),
       "版本: v" + (item.version ?? "-")
     ].join("  ·  ");
 
@@ -177,10 +177,13 @@ let cardSequence = 0;
 
     card.append(head, m1, m2, abst);
 
-    if (Array.isArray(c.tags) && c.tags.length) {
+    const visibleTags = Array.isArray(c.tags)
+      ? c.tags.filter((tag) => !String(tag).startsWith("source:"))
+      : [];
+    if (visibleTags.length) {
       const ul = document.createElement("ul");
       ul.className = "tags";
-      c.tags.forEach((tag) => {
+      visibleTags.forEach((tag) => {
         const li = document.createElement("li");
         li.className = "tag";
         li.textContent = tag;
@@ -243,7 +246,9 @@ let cardSequence = 0;
         });
 
         const text = document.createElement("span");
-        text.textContent = `${node.name} (${selectorValue})`;
+        text.textContent = String(selectorValue).startsWith("source:")
+          ? node.name
+          : `${node.name} (${selectorValue})`;
 
         const count = document.createElement("span");
         count.className = "tag-count";

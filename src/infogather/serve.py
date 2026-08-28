@@ -5,6 +5,7 @@ from .storage import (
 )
 from .paths import DEFAULT_CONFIG_PATH, DEFAULT_DB_PATH, WEB_DIR
 from .ingestion import run_ingestion
+from .sources import configured_sources
 
 import argparse
 import base64
@@ -145,16 +146,6 @@ def _entry_query_options(query: dict[str, list[str]]) -> dict:
     }
 
 
-def _extract_arxiv_tag(url: str) -> str | None:
-    if not url:
-        return None
-    path = urlparse(url).path.strip("/")
-    if not path:
-        return None
-    tag = path.split("/")[-1].strip()
-    return tag or None
-
-
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -211,22 +202,24 @@ def _load_configured_sources(conf_path: Path) -> list[dict]:
     with conf_path.open("rb") as f:
         conf = tomllib.load(f)
 
-    raw_sources = conf.get("arXiv", [])
-    if not isinstance(raw_sources, list):
+    try:
+        sources = configured_sources(conf)
+    except ValueError:
         return []
-    children = []
-    seen = set()
-    for idx, item in enumerate(raw_sources):
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name", "")).strip() or f"arXiv-{idx + 1}"
-        url = str(item.get("url", "")).strip()
-        tag = _extract_arxiv_tag(url)
-        if not tag or tag in seen:
-            continue
-        seen.add(tag)
-        children.append({"name": name, "url": url, "selector_value": tag})
-    return [{"name": "arXiv", "children": children}]
+    groups = []
+    by_name = {}
+    for source in sources:
+        group = by_name.get(source["srce_ty"])
+        if group is None:
+            group = {"name": source["srce_ty"], "children": []}
+            by_name[source["srce_ty"]] = group
+            groups.append(group)
+        group["children"].append({
+            "name": source["name"],
+            "url": source["url"],
+            "selector_value": source["selector_value"],
+        })
+    return groups
 
 
 def _normalize_db_path(raw_path: str) -> str | Path:

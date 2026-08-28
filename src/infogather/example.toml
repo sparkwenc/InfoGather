@@ -1,3 +1,18 @@
 [[arXiv]]
 name = "Algebraic Geometry"
 url = "https://rss.arxiv.org/rss/math.AG"
+
+[[Journals]]
+key = "annals"
+name = "Annals of Mathematics"
+url = "https://annals.math.princeton.edu/feed"
+
+[[Journals]]
+key = "jams"
+name = "Journal of the American Mathematical Society"
+url = "https://www.ams.org/rss/jams.rss"
+
+[[Journals]]
+key = "inventiones"
+name = "Inventiones mathematicae"
+url = "https://link.springer.com/search.rss?facet-content-type=Article&facet-journal-id=222"

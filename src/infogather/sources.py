@@ -4,6 +4,7 @@ import feedparser
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from urllib.error import HTTPError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -12,6 +13,72 @@ from .filters import parse_updated
 
 
 MAX_FEED_BYTES = 8 * 1024 * 1024
+MAX_SOURCE_SELECTOR_LENGTH = 256
+
+
+class _TextExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in {"br", "div", "li", "p"}:
+            self.parts.append(" ")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"div", "li", "p"}:
+            self.parts.append(" ")
+
+    def handle_data(self, data: str) -> None:
+        self.parts.append(data)
+
+
+def _extract_arxiv_tag(url: str) -> str | None:
+    path = urlparse(url).path.strip("/")
+    if not path:
+        return None
+    return path.split("/")[-1].strip() or None
+
+
+def configured_sources(conf: dict) -> list[dict]:
+    sources = []
+    seen_urls = set()
+    seen_keys = set()
+    for srce_ty, raw_sources in conf.items():
+        if not isinstance(raw_sources, list):
+            raise ValueError(f"source group {srce_ty!r} must be a list")
+        for item in raw_sources:
+            if not isinstance(item, dict):
+                raise ValueError(f"source in {srce_ty!r} must be a table")
+            name = str(item.get("name", "")).strip() or "unknown"
+            url = str(item.get("url", "")).strip()
+            if not url:
+                raise ValueError(f"source {name!r} has no URL")
+            if url in seen_urls:
+                continue
+            key = (
+                _extract_arxiv_tag(url)
+                if srce_ty == "arXiv"
+                else str(item.get("key", "")).strip() or name
+            )
+            if not key:
+                raise ValueError(f"source {name!r} has no key")
+            identity = (str(srce_ty), key)
+            if identity in seen_keys:
+                raise ValueError(f"duplicate source key: {srce_ty}:{key}")
+            selector = key if srce_ty == "arXiv" else f"source:{srce_ty}:{key}"
+            if len(selector) > MAX_SOURCE_SELECTOR_LENGTH:
+                raise ValueError(f"source selector is too long: {srce_ty}:{key}")
+            seen_urls.add(url)
+            seen_keys.add(identity)
+            sources.append({
+                "srce_ty": str(srce_ty),
+                "key": key,
+                "name": name,
+                "url": url,
+                "selector_value": selector,
+            })
+    return sources
 
 
 class InfoSources:
@@ -35,8 +102,17 @@ class InfoSources:
         raw_feeds, state_updates = self._fetch_raw_feeds()
 
         print("Normalizing feeds...")
-        normalized = self._normalized_arXiv(raw_feeds)
-        print(f"arXiv: {len(normalized):3d} normalized")
+        arxiv = self._normalized_arXiv([
+            item["feed"] for item in raw_feeds
+            if item["source"]["srce_ty"] == "arXiv"
+        ])
+        rss = self._normalized_rss([
+            item for item in raw_feeds
+            if item["source"]["srce_ty"] != "arXiv"
+        ])
+        print(f"arXiv: {len(arxiv):3d} normalized")
+        print(f"RSS:   {len(rss):3d} normalized")
+        normalized = [*arxiv, *rss]
         deduplicated = self._deduplicate_entries(normalized)
         duplicate_count = len(normalized) - len(deduplicated)
         if duplicate_count:
@@ -51,23 +127,7 @@ class InfoSources:
 
         feeds: dict[int, dict] = {}
         state_updates: dict[str, dict] = {}
-        requests = []
-        seen_urls = set()
-        raw_sources = self._conf.get("arXiv", [])
-        if not isinstance(raw_sources, list):
-            raise ValueError("source group 'arXiv' must be a list")
-        for item in raw_sources:
-            if not isinstance(item, dict):
-                raise ValueError("source in 'arXiv' must be a table")
-            name = str(item.get("name", "")).strip() or "unknown"
-            url = str(item.get("url", "")).strip()
-            if not url:
-                raise ValueError(f"source {name!r} has no URL")
-            if url in seen_urls:
-                print(f"      duplicate URL skipped: {name}")
-                continue
-            seen_urls.add(url)
-            requests.append((name, url))
+        requests = configured_sources(self._conf)
 
         total = len(requests)
         self.total_feeds = total
@@ -84,14 +144,16 @@ class InfoSources:
         cached = 0
         failed = 0
         total_entries = 0
-        for index, (name, url) in enumerate(requests):
+        for index, source in enumerate(requests):
+            name = source["name"]
+            url = source["url"]
             state = self._feed_states.get(url, {})
             if float(state.get("next_fetch_at", 0) or 0) > now:
                 completed += 1
                 cached += 1
                 print(f"SOURCE {completed}/{total}: cached {name}")
                 continue
-            pending.append((index, name, url, state))
+            pending.append((index, source, state))
 
         with ThreadPoolExecutor(
             max_workers=min(self._max_workers, max(len(pending), 1))
@@ -99,14 +161,16 @@ class InfoSources:
             futures = {
                 executor.submit(
                     self._fetch_feed,
-                    url,
-                    name,
+                    source["url"],
+                    source["name"],
                     state,
-                ): (index, name, url)
-                for index, name, url, state in pending
+                ): (index, source)
+                for index, source, state in pending
             }
             for future in as_completed(futures):
-                index, name, url = futures[future]
+                index, source = futures[future]
+                name = source["name"]
+                url = source["url"]
                 completed += 1
                 try:
                     feed, state_update = future.result()
@@ -116,7 +180,7 @@ class InfoSources:
                         print(f"SOURCE {completed}/{total}: not modified {name}")
                         continue
                     count = len(feed.get("entries", []))
-                    feeds[index] = feed
+                    feeds[index] = {"source": source, "feed": feed}
                     total_entries += count
                     print(f"SOURCE {completed}/{total}: {count:3d} from {name}")
                 except Exception as exc:
@@ -197,7 +261,10 @@ class InfoSources:
 
             feed = feedparser.parse(
                 response_content,
-                response_headers=dict(response_headers),
+                response_headers={
+                    str(key).lower(): value
+                    for key, value in response_headers.items()
+                },
             )
             if feed.get("bozo"):
                 detail = feed.get("bozo_exception", "parse error")
@@ -385,6 +452,80 @@ class InfoSources:
                         "auth": entry.get("author"),
                         "abst": abstract,
                         "tags": tags,
+                    },
+                })
+        return normalized
+
+    @staticmethod
+    def _plain_text(value: object) -> str:
+        parser = _TextExtractor()
+        parser.feed(str(value or ""))
+        parser.close()
+        return " ".join("".join(parser.parts).split())
+
+    def _normalized_rss(self, feeds: list[dict]) -> list[dict]:
+        normalized = []
+        for item in feeds:
+            source = item["source"]
+            feed = item["feed"]
+            feed_dt = self._parsed_iso(feed.get("feed", {}))
+            feed_dt = feed_dt or datetime.now(timezone.utc).isoformat()
+            source_url = urlparse(source["url"])
+
+            for entry in feed.get("entries", []):
+                raw_id = entry.get("id") or entry.get("link")
+                if not isinstance(raw_id, str) or not raw_id.strip():
+                    print(f"{source['name']}: entry without ID or link skipped")
+                    continue
+
+                author = str(entry.get("author") or "").strip()
+                if not author:
+                    author = ", ".join(
+                        str(value.get("name") or "").strip()
+                        for value in entry.get("authors", []) or []
+                        if isinstance(value, dict) and value.get("name")
+                    )
+
+                summary = str(entry.get("summary") or "")
+                if (
+                    not author
+                    and source_url.hostname in {"ams.org", "www.ams.org"}
+                    and source_url.path.startswith("/rss/")
+                ):
+                    parts = re.split(r"<br\s*/?>", summary, maxsplit=1, flags=re.I)
+                    if len(parts) == 2:
+                        author = self._plain_text(parts[0])
+                        summary = parts[1]
+                if source_url.hostname == "annals.math.princeton.edu":
+                    # The feed's dc:creator is a WordPress editor, not the paper author.
+                    author = ""
+
+                content = entry.get("content", []) or []
+                if content and isinstance(content[0], dict):
+                    summary = str(content[0].get("value") or summary)
+                tags = []
+                for tag in entry.get("tags", []) or []:
+                    if not isinstance(tag, dict):
+                        continue
+                    term = tag.get("term")
+                    if isinstance(term, str) and term.strip():
+                        tags.append(term.strip())
+                tags.append(source["selector_value"])
+
+                normalized.append({
+                    "srce_ty": source["srce_ty"],
+                    "srce_id": f"{source['key']}:{raw_id.strip()}",
+                    "version": 1,
+                    "favored": 0,
+                    "noticed": 0,
+                    "updated": self._parsed_iso(entry) or feed_dt,
+                    "content": {
+                        "link": entry.get("link"),
+                        "titl": self._plain_text(entry.get("title")),
+                        "auth": author,
+                        "abst": self._plain_text(summary),
+                        "source": source["name"],
+                        "tags": list(dict.fromkeys(tags)),
                     },
                 })
         return normalized

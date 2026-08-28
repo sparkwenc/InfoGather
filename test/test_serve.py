@@ -242,6 +242,29 @@ class ServeInsTests(unittest.TestCase):
 
         self.assertEqual(_normalize_db_path(uri), uri)
 
+    def test_load_configured_sources_includes_journal_rss(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "config.toml"
+            conf_path.write_text("""
+                [[arXiv]]
+                name = "Algebraic Geometry"
+                url = "https://rss.arxiv.org/rss/math.AG"
+
+                [[Journals]]
+                key = "annals"
+                name = "Annals of Mathematics"
+                url = "https://annals.math.princeton.edu/feed"
+            """)
+
+            groups = serve._load_configured_sources(conf_path)
+
+        self.assertEqual([group["name"] for group in groups], ["arXiv", "Journals"])
+        self.assertEqual(groups[0]["children"][0]["selector_value"], "math.AG")
+        self.assertEqual(
+            groups[1]["children"][0]["selector_value"],
+            "source:Journals:annals",
+        )
+
     def test_cursor_round_trip_supports_long_ids_and_rejects_big_integers(self) -> None:
         position = (123, "arXiv", "x" * 400)
 

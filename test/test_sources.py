@@ -1,6 +1,7 @@
 import io
 import unittest
 import time
+import feedparser
 from datetime import datetime
 from http.client import IncompleteRead
 from urllib.error import HTTPError
@@ -112,6 +113,26 @@ class InfoSourcesTests(unittest.TestCase):
                     delay=0,
                 )
 
+    def test_fetch_feed_normalizes_response_header_names(self) -> None:
+        body = b"""
+            <rss version="2.0"><channel><item>
+              <title>Result</title><guid>result-1</guid>
+            </item></channel></rss>
+        """
+        response = Response(
+            body,
+            headers={"Content-Type": "application/rss+xml; charset=UTF-8"},
+        )
+
+        with patch("infogather.sources.urlopen", return_value=response):
+            feed, _ = InfoSources._fetch_feed(
+                "https://example.com/feed",
+                "Example",
+                attempts=1,
+            )
+
+        self.assertEqual(feed["entries"][0]["id"], "result-1")
+
     def test_fetch_feed_uses_conditional_etag(self) -> None:
         not_modified = HTTPError(
             "https://rss.arxiv.org/rss/math.NT",
@@ -157,9 +178,12 @@ class InfoSourcesTests(unittest.TestCase):
         urls = [f"https://example.com/{name}" for name in ("first", "bad", "last")]
         source = InfoSources({
             "arXiv": [
-                {"name": name, "url": url}
-                for name, url in zip(("first", "bad", "last"), urls)
-            ]
+                {"name": "first", "url": urls[0]},
+                {"name": "bad", "url": urls[1]},
+            ],
+            "Journals": [
+                {"key": "last", "name": "last", "url": urls[2]},
+            ],
         })
 
         def fetch(url, name, _state):
@@ -177,7 +201,15 @@ class InfoSourcesTests(unittest.TestCase):
         ):
             feeds, updates = source._fetch_raw_feeds()
 
-        self.assertEqual([feed["name"] for feed in feeds], ["first", "last"])
+        self.assertEqual(
+            [item["feed"]["name"] for item in feeds],
+            ["first", "last"],
+        )
+        self.assertEqual(
+            [item["source"]["srce_ty"] for item in feeds],
+            ["arXiv", "Journals"],
+        )
+        self.assertEqual(feeds[1]["source"]["key"], "last")
         self.assertEqual(set(updates), {urls[0], urls[2]})
         self.assertEqual(source.failed_feeds, 1)
 
@@ -185,7 +217,14 @@ class InfoSourcesTests(unittest.TestCase):
         source = InfoSources({})
         update = {"https://example.com/feed": {"etag": "new"}}
         with (
-            patch.object(source, "_fetch_raw_feeds", return_value=([{}], update)),
+            patch.object(
+                source,
+                "_fetch_raw_feeds",
+                return_value=([{
+                    "source": {"srce_ty": "arXiv"},
+                    "feed": {},
+                }], update),
+            ),
             patch.object(
                 source,
                 "_normalized_arXiv",
@@ -197,6 +236,103 @@ class InfoSourcesTests(unittest.TestCase):
                 source.get_normalized_feeds()
 
         self.assertEqual(source.feed_state_updates, {})
+
+    def test_normalizes_mixed_arxiv_and_journal_feeds(self) -> None:
+        journal = feedparser.parse(b"""
+            <rss version="2.0"><channel><item>
+              <title>Journal result</title>
+              <description>Jane Doe and John Doe&lt;br /&gt;JAMS 39, 1-20.</description>
+              <link>https://www.ams.org/article</link>
+              <guid isPermaLink="false">abc123</guid>
+              <pubDate>Thu, 30 Jul 2026 15:54 EDT</pubDate>
+            </item></channel></rss>
+        """)
+        raw = [
+            {
+                "source": {
+                    "srce_ty": "arXiv",
+                    "key": "math.AG",
+                    "name": "Algebraic Geometry",
+                    "url": "https://rss.arxiv.org/rss/math.AG",
+                    "selector_value": "math.AG",
+                },
+                "feed": {
+                    "feed": {},
+                    "entries": [{
+                        "id": "oai:arXiv.org:2601.00001v1",
+                        "title": "arXiv result",
+                        "summary": "Abstract: arXiv abstract.",
+                    }],
+                },
+            },
+            {
+                "source": {
+                    "srce_ty": "Journals",
+                    "key": "jams",
+                    "name": "Journal of the American Mathematical Society",
+                    "url": "https://www.ams.org/rss/jams.rss",
+                    "selector_value": "source:Journals:jams",
+                },
+                "feed": journal,
+            },
+        ]
+        source = InfoSources({})
+
+        with (
+            patch.object(source, "_fetch_raw_feeds", return_value=(raw, {})),
+            patch("builtins.print"),
+        ):
+            entries = source.get_normalized_feeds()
+
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[1]["srce_id"], "jams:abc123")
+        self.assertEqual(entries[1]["version"], 1)
+        self.assertEqual(entries[1]["content"]["auth"], "Jane Doe and John Doe")
+        self.assertEqual(entries[1]["content"]["abst"], "JAMS 39, 1-20.")
+        self.assertEqual(
+            entries[1]["content"]["tags"],
+            ["source:Journals:jams"],
+        )
+        self.assertEqual(
+            entries[1]["content"]["source"],
+            "Journal of the American Mathematical Society",
+        )
+
+    def test_generic_rss_uses_full_content_and_ignores_annals_editor(self) -> None:
+        feed = feedparser.parse(b"""
+            <rss version="2.0"
+              xmlns:content="http://purl.org/rss/1.0/modules/content/"
+              xmlns:dc="http://purl.org/dc/elements/1.1/">
+              <channel><item>
+                <title>Annals result</title>
+                <link>https://annals.math.princeton.edu/articles/1</link>
+                <guid>annals-1</guid>
+                <dc:creator>mak</dc:creator>
+                <description>Short summary...</description>
+                <content:encoded><![CDATA[<p>Full <b>abstract</b>.</p>]]></content:encoded>
+                <category>To appear</category>
+              </item></channel>
+            </rss>
+        """)
+        source = InfoSources({})
+
+        entries = source._normalized_rss([{
+            "source": {
+                "srce_ty": "Journals",
+                "key": "annals",
+                "name": "Annals of Mathematics",
+                "url": "https://annals.math.princeton.edu/feed",
+                "selector_value": "source:Journals:annals",
+            },
+            "feed": feed,
+        }])
+
+        self.assertEqual(entries[0]["content"]["auth"], "")
+        self.assertEqual(entries[0]["content"]["abst"], "Full abstract.")
+        self.assertEqual(
+            entries[0]["content"]["tags"],
+            ["To appear", "source:Journals:annals"],
+        )
 
     def test_deduplicate_entries_keeps_newest_and_merges_tags(self) -> None:
         first = {
