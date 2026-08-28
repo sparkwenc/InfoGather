@@ -330,13 +330,83 @@ input {
   accent-color: var(--danger);
 }
 
-.ins-log {
-  max-height: 150px;
-  margin: 8px 0 0;
-  overflow: auto;
+.ins-log-shell {
+  margin-top: 10px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.ins-log-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--line);
+  color: var(--faint);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.ins-log-count {
+  min-width: 20px;
+  padding: 1px 6px;
+  border-radius: 999px;
   color: var(--muted);
-  font: 10px/1.55 var(--font-mono);
-  white-space: pre-wrap;
+  background: var(--surface-muted);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+  text-align: center;
+}
+
+.ins-log {
+  max-height: 190px;
+  overflow: auto;
+  padding: 4px;
+}
+
+.ins-log-item {
+  display: grid;
+  grid-template-columns: 7px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  padding: 6px 7px;
+  border-radius: 7px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.ins-log-item:hover {
+  background: var(--surface-muted);
+}
+
+.ins-log-marker {
+  width: 6px;
+  height: 6px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.ins-log-item[data-tone="success"] .ins-log-marker {
+  background: var(--success);
+}
+
+.ins-log-item[data-tone="cached"] .ins-log-marker {
+  background: var(--faint);
+}
+
+.ins-log-item[data-tone="failed"] {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.ins-log-item[data-tone="failed"] .ins-log-marker {
+  background: var(--danger);
 }
 
 /* ---------- source tree ---------- */
@@ -683,11 +753,6 @@ input {
   display: grid;
   gap: 12px;
   margin-top: 12px;
-}
-
-.list[aria-busy="true"] {
-  opacity: 0.72;
-  transition: opacity 0.18s ease;
 }
 
 .card {

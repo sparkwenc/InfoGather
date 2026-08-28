@@ -44,7 +44,10 @@ let cardSequence = 0;
   }
 
   function renderInsJob(elements, job) {
-    const { insPanel, insBtn, insPercent, insProgress, insText, insLog } = elements;
+    const {
+      insPanel, insBtn, insPercent, insProgress, insText,
+      insLog, insLogShell, insLogCount
+    } = elements;
     const insBtnLabel = insBtn.querySelector("#ins-btn-label");
 
     if (!job || (job.state === "idle" && !job.started_at)) {
@@ -66,8 +69,30 @@ let cardSequence = 0;
     if (job.state === "failed") prefix = "失败";
     insText.textContent = `${prefix}: ${job.message || ""}`;
     const logs = Array.isArray(job.logs) ? job.logs : [];
-    insLog.textContent = logs.join("\n");
-    insLog.hidden = logs.length === 0;
+    const rows = logs.map((message) => {
+      const row = document.createElement("div");
+      row.className = "ins-log-item";
+      if (message.includes("失败")) row.dataset.tone = "failed";
+      else if (
+        message.includes("完成")
+        || message.includes("写入:")
+        || /: 拉取 \d+ 条/.test(message)
+      ) {
+        row.dataset.tone = "success";
+      } else if (message.includes("使用缓存") || message.includes("无更新")) {
+        row.dataset.tone = "cached";
+      }
+      const marker = document.createElement("span");
+      marker.className = "ins-log-marker";
+      marker.setAttribute("aria-hidden", "true");
+      const text = document.createElement("span");
+      text.textContent = message;
+      row.append(marker, text);
+      return row;
+    });
+    insLog.replaceChildren(...rows);
+    insLogShell.hidden = logs.length === 0;
+    insLogCount.textContent = String(logs.length);
     if (logs.length) insLog.scrollTop = insLog.scrollHeight;
 
     const running = job.state === "running";

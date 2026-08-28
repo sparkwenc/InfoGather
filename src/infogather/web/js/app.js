@@ -29,7 +29,8 @@ const state = {
   insStatusController: null,
   insWasRunning: false,
   insLastCompletion: null,
-  insRunStarting: false
+  insRunStarting: false,
+  treeRefreshTimer: null
 };
 
 const metaEl = document.getElementById("meta");
@@ -44,6 +45,8 @@ const insText = document.getElementById("ins-text");
 const insPercent = document.getElementById("ins-percent");
 const insProgress = document.getElementById("ins-progress");
 const insLog = document.getElementById("ins-log");
+const insLogShell = document.getElementById("ins-log-shell");
+const insLogCount = document.getElementById("ins-log-count");
 
 const treeRootEl = document.getElementById("tree-root");
 const treeListEl = document.getElementById("tree-list");
@@ -58,7 +61,8 @@ const versionNotBtn = document.getElementById("version-not-btn");
 const resultsHeading = document.getElementById("results-heading");
 
 const insElements = {
-  insPanel, insBtn, insText, insPercent, insProgress, insLog
+  insPanel, insBtn, insText, insPercent, insProgress,
+  insLog, insLogShell, insLogCount
 };
 
 function renderUndo() {
@@ -75,7 +79,6 @@ function setLastUndo(action) {
 function beginMutation() {
   if (state.mutating) return false;
   state.mutating = true;
-  listEl.setAttribute("aria-busy", "true");
   renderUndo();
   return true;
 }
@@ -91,6 +94,66 @@ function findRenderedEntry(item) {
     card.dataset.sourceType === String(item.srce_ty || "")
     && card.dataset.sourceId === String(item.srce_id || "")
   )) || null;
+}
+
+function entryMatchesMutableFilters(item) {
+  return (
+    (!state.favoredOnly || Number(item.favored || 0) === 1)
+    && (!state.unnoticedOnly || Number(item.noticed || 0) === 0)
+  );
+}
+
+function removeRenderedEntry(card) {
+  card.remove();
+  state.offset = Math.max(0, state.offset - 1);
+  if (Number.isFinite(state.total)) state.total = Math.max(0, state.total - 1);
+  if (!state.hasMore && !listEl.querySelector(".card")) {
+    const empty = document.createElement("p");
+    empty.className = "empty";
+    empty.textContent = "没有匹配的条目。";
+    listEl.replaceChildren(empty);
+  }
+  ui.setMeta(metaEl, state);
+}
+
+function updateRenderedEntry(item, card) {
+  card._liveItem = item;
+  if (!entryMatchesMutableFilters(item)) {
+    removeRenderedEntry(card);
+    return false;
+  }
+
+  const title = card.querySelector(".title")?.textContent || "该条目";
+  const favored = Number(item.favored || 0) === 1;
+  const favoredBtn = card.querySelector('[data-action="favored"]');
+  favoredBtn.classList.toggle("on", favored);
+  favoredBtn.dataset.favored = favored ? "1" : "0";
+  favoredBtn.querySelector("span").textContent = favored ? "已收藏" : "收藏";
+  favoredBtn.setAttribute("aria-pressed", String(favored));
+  favoredBtn.setAttribute(
+    "aria-label",
+    favored ? `取消收藏《${title}》` : `收藏《${title}》`
+  );
+
+  const noticed = Number(item.noticed || 0) === 1;
+  const noticedBtn = card.querySelector('[data-action="noticed"]');
+  noticedBtn.classList.toggle("on", noticed);
+  noticedBtn.dataset.noticed = noticed ? "1" : "0";
+  noticedBtn.querySelector("span").textContent = noticed ? "已读" : "未读";
+  noticedBtn.setAttribute("aria-pressed", String(noticed));
+  noticedBtn.setAttribute(
+    "aria-label",
+    noticed ? `标记《${title}》为未读` : `标记《${title}》为已读`
+  );
+  return true;
+}
+
+function scheduleTreeRefresh() {
+  clearTimeout(state.treeRefreshTimer);
+  state.treeRefreshTimer = setTimeout(() => {
+    state.treeRefreshTimer = null;
+    if (!document.hidden) void loadTagTree();
+  }, 250);
 }
 
 function stopInsPolling() {
@@ -148,6 +211,8 @@ function buildFilterParams() {
 }
 
 async function refreshFilteredView() {
+  clearTimeout(state.treeRefreshTimer);
+  state.treeRefreshTimer = null;
   state.refreshController?.abort();
   const controller = new AbortController();
   state.refreshController = controller;
@@ -293,10 +358,17 @@ async function updateFlag(item, field, value, btnEl) {
   const previousRevision = Number(item.state_rev || 0);
   const restoreFocus = btnEl.matches(":focus-visible");
   const update = field === "favored" ? api.setFavored : api.setNoticed;
+  const card = btnEl.closest(".card");
+  let remainsVisible = true;
+  let succeeded = false;
+  btnEl.disabled = true;
   try {
     const response = await update(
       item.srce_ty, item.srce_id, value, previous, previousRevision
     );
+    item[field] = value;
+    item.state_rev = response.state_rev;
+    remainsVisible = updateRenderedEntry(item, card);
     setLastUndo({
       type: field,
       srceTy: item.srce_ty,
@@ -308,7 +380,13 @@ async function updateFlag(item, field, value, btnEl) {
         ? (value === 1 ? "撤销收藏" : "撤销取消收藏")
         : (value === 1 ? "撤销标为已读" : "撤销标为未读")
     });
-    await refreshFilteredView();
+    if (
+      (field === "favored" && state.favoredOnly)
+      || (field === "noticed" && state.unnoticedOnly)
+    ) {
+      scheduleTreeRefresh();
+    }
+    succeeded = true;
   } catch (err) {
     console.error(err);
     window.alert(field === "favored"
@@ -316,8 +394,11 @@ async function updateFlag(item, field, value, btnEl) {
       : "已读状态更新失败，请稍后重试。");
     await refreshFilteredView();
   } finally {
+    if (btnEl.isConnected) btnEl.disabled = false;
     endMutation();
-    if (restoreFocus) resultsHeading.focus();
+    if (restoreFocus && (!succeeded || !remainsVisible)) {
+      (succeeded ? undoBtn : resultsHeading).focus();
+    }
   }
 }
 
@@ -405,14 +486,14 @@ async function loadTagTree(signal) {
   try {
     const params = buildFilterParams();
     const payload = await api.getTagTree(params, signal);
-    if (signal.aborted) return;
+    if (signal?.aborted) return;
     const root = payload.root || { name: "配置源", group_count: 0, source_count: 0, count: 0 };
     treeRootEl.textContent = `${root.name}（${root.group_count} 类 / ${root.source_count} 源 / ${root.count} 条）`;
     state.treeGroups = Array.isArray(payload.groups) ? payload.groups : [];
     renderTree();
     return true;
   } catch (err) {
-    if (signal.aborted) return false;
+    if (signal?.aborted) return false;
     treeRootEl.textContent = "配置源 (加载失败)";
     treeListEl.innerHTML = '<li class="tree-item tree-empty">无法读取来源列表</li>';
     console.error(err);

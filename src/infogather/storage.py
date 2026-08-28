@@ -305,11 +305,13 @@ class InfoStorage:
                 params,
             ).fetchone()[0]
             tag_counts: dict[str, int] = {}
+            group_counts = [0] * len(groups)
             if configured_tags:
-                placeholders = ",".join("?" for _ in configured_tags)
-                rows = conn.execute(
+                sorted_tags = sorted(configured_tags)
+                placeholders = ",".join("?" for _ in sorted_tags)
+                cursor = conn.execute(
                     f"""
-                    SELECT t.value AS tag, COUNT(DISTINCT e.rowid) AS entry_count
+                    SELECT e.rowid AS entry_id, t.value AS tag
                     FROM tab_entries AS e
                     JOIN json_each(e.content, '$.tags') AS t
                     {self._where_sql([
@@ -317,28 +319,29 @@ class InfoStorage:
                         "t.type = 'text'",
                         f"t.value IN ({placeholders})",
                     ])}
-                    GROUP BY t.value
+                    ORDER BY e.rowid
                     """,
-                    [*params, *sorted(configured_tags)],
-                ).fetchall()
-                tag_counts = {
-                    str(row["tag"]): int(row["entry_count"]) for row in rows
-                }
-            # ponytail: repeated scans avoid duplicate indexes; add measured
-            # materialized indexes only if facet latency becomes visible.
-            group_counts = []
-            for group_tags in groups:
-                group_clause, group_params = self._selector_sql(group_tags)
-                if not group_clause:
-                    group_counts.append(0)
-                    continue
-                group_counts.append(
-                    int(conn.execute(
-                        "SELECT COUNT(*) FROM tab_entries AS e"
-                        f"{self._where_sql([*where, group_clause])}",
-                        [*params, *group_params],
-                    ).fetchone()[0])
+                    [*params, *sorted_tags],
                 )
+                group_indexes = {
+                    tag: [
+                        index for index, group in enumerate(groups)
+                        if tag in group
+                    ]
+                    for tag in sorted_tags
+                }
+                last_tag_entry: dict[str, int] = {}
+                last_group_entry: list[int | None] = [None] * len(groups)
+                for row in cursor:
+                    entry_id = int(row["entry_id"])
+                    tag = str(row["tag"])
+                    if last_tag_entry.get(tag) != entry_id:
+                        tag_counts[tag] = tag_counts.get(tag, 0) + 1
+                        last_tag_entry[tag] = entry_id
+                    for index in group_indexes[tag]:
+                        if last_group_entry[index] != entry_id:
+                            group_counts[index] += 1
+                            last_group_entry[index] = entry_id
         return {
             "total": int(total),
             "tag_counts": tag_counts,

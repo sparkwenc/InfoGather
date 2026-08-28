@@ -713,6 +713,7 @@ class InfoStorageTests(unittest.TestCase):
             restored = storage.query_entries(query_text="New searchable")
 
         self.assertEqual(facets["tag_counts"], {"math.AG": 1, "math.NT": 1})
+        self.assertEqual(facets["group_counts"], [1])
         self.assertEqual(restored["total"], 1)
 
     def test_short_search_does_not_match_json_field_names(self) -> None:

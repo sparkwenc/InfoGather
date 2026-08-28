@@ -43,7 +43,13 @@
               aria-label="拉取进度"
               aria-describedby="ins-text"
             ></progress>
-            <pre id="ins-log" class="ins-log" aria-label="拉取详情"></pre>
+            <section id="ins-log-shell" class="ins-log-shell" hidden>
+              <div class="ins-log-header">
+                <span>拉取详情</span>
+                <span id="ins-log-count" class="ins-log-count"></span>
+              </div>
+              <div id="ins-log" class="ins-log" role="log" aria-live="polite"></div>
+            </section>
           </section>
         </div>
         <p id="tree-root" class="tree-root">正在读取配置源...</p>
