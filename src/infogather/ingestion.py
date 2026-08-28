@@ -1,12 +1,17 @@
 import fcntl
+import threading
 import tomllib
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qsl, unquote, urlencode, urlparse
 
 from .sources import InfoSources
 from .storage import InfoStorage
+
+
+_MEMORY_LOCKS: dict[str, threading.Lock] = {}
+_MEMORY_LOCKS_GUARD = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -26,8 +31,19 @@ def load_config(path: str | Path) -> dict:
 @contextmanager
 def _ingestion_lock(db_path: str | Path):
     raw_path = str(db_path)
-    if raw_path == ":memory:" or "mode=memory" in raw_path:
+    if raw_path == ":memory:":
         yield
+        return
+    parsed = urlparse(raw_path)
+    query = parse_qsl(parsed.query)
+    if raw_path.startswith("file:") and dict(query).get("mode") == "memory":
+        memory_key = parsed._replace(
+            query=urlencode(sorted(query))
+        ).geturl()
+        with _MEMORY_LOCKS_GUARD:
+            lock = _MEMORY_LOCKS.setdefault(memory_key, threading.Lock())
+        with lock:
+            yield
         return
     if raw_path.startswith("file:"):
         raw_path = unquote(urlparse(raw_path).path)

@@ -6,11 +6,47 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from infogather.ingestion import run_ingestion
+from infogather.ingestion import _ingestion_lock, run_ingestion
 from infogather.storage import InfoStorage
 
 
 class IngestionTests(unittest.TestCase):
+    def test_file_path_containing_memory_mode_text_uses_file_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "mode=memory.db"
+            with _ingestion_lock(db_path):
+                pass
+            self.assertTrue(Path(f"{db_path}.ingest.lock").is_file())
+
+    def test_named_shared_memory_ingestion_lock_serializes_threads(self) -> None:
+        first_entered = threading.Event()
+        release_first = threading.Event()
+        second_entered = threading.Event()
+        uri = "file:ingestion-lock?cache=shared&mode=memory"
+
+        def hold_first():
+            with _ingestion_lock(uri):
+                first_entered.set()
+                release_first.wait(2)
+
+        def enter_second():
+            with _ingestion_lock("file:ingestion-lock?mode=memory&cache=shared"):
+                second_entered.set()
+
+        first = threading.Thread(target=hold_first)
+        second = threading.Thread(target=enter_second)
+        first.start()
+        self.assertTrue(first_entered.wait(2))
+        second.start()
+        try:
+            self.assertFalse(second_entered.wait(0.1))
+        finally:
+            release_first.set()
+            first.join(2)
+            second.join(2)
+
+        self.assertTrue(second_entered.is_set())
+
     def test_run_ingestion_returns_counts_and_commits_entries_with_cache(self) -> None:
         class FakeSources:
             total_feeds = 2
