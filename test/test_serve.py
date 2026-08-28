@@ -103,7 +103,6 @@ class ServeInsTests(unittest.TestCase):
             serve.INS_JOB["message"] = "test"
             serve.INS_JOB["started_at"] = None
             serve.INS_JOB["ended_at"] = None
-            serve.INS_JOB["logs"] = []
 
     def test_run_ins_job_passes_database_and_config_paths(self) -> None:
         result = IngestionResult(2, 0, 1, 3, 2)
@@ -120,14 +119,7 @@ class ServeInsTests(unittest.TestCase):
         self.assertEqual(serve.INS_JOB["state"], "succeeded")
         self.assertEqual(
             serve.INS_JOB["message"],
-            "拉取完成: 2/3 条更新，1 个源失败",
-        )
-        self.assertEqual(
-            serve.INS_JOB["logs"],
-            [
-                "Annals of Mathematics: 拉取 50 条",
-                "拉取完成: 2/3 条更新，1 个源失败",
-            ],
+            "写入 2/3 条",
         )
 
     def test_ins_run_can_return_an_already_completed_job(self) -> None:

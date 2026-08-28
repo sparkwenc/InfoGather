@@ -42,11 +42,7 @@ const undoBtn = document.getElementById("undo-btn");
 const insBtn = document.getElementById("ins-btn");
 const insPanel = document.getElementById("ins-panel");
 const insText = document.getElementById("ins-text");
-const insPercent = document.getElementById("ins-percent");
 const insProgress = document.getElementById("ins-progress");
-const insLog = document.getElementById("ins-log");
-const insLogShell = document.getElementById("ins-log-shell");
-const insLogCount = document.getElementById("ins-log-count");
 
 const treeRootEl = document.getElementById("tree-root");
 const treeListEl = document.getElementById("tree-list");
@@ -61,8 +57,7 @@ const versionNotBtn = document.getElementById("version-not-btn");
 const resultsHeading = document.getElementById("results-heading");
 
 const insElements = {
-  insPanel, insBtn, insText, insPercent, insProgress,
-  insLog, insLogShell, insLogCount
+  insPanel, insBtn, insText, insProgress
 };
 
 function renderUndo() {
@@ -161,7 +156,7 @@ function stopInsPolling() {
   state.insPollTimer = null;
 }
 
-function startInsPolling(delay = 900) {
+function startInsPolling(delay = 250) {
   if (state.insPollTimer || document.hidden) return;
   state.insPollTimer = setTimeout(() => {
     state.insPollTimer = null;

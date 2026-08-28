@@ -30,7 +30,6 @@ INS_JOB = {
     "message": "就绪",
     "started_at": None,
     "ended_at": None,
-    "logs": [],
 }
 REMOVE_UNDO_LOCK = threading.Lock()
 REMOVE_UNDO = {"token": None, "entry": None}
@@ -152,9 +151,7 @@ def _utcnow_iso() -> str:
 
 
 def _ins_snapshot_unlocked() -> dict:
-    snapshot = dict(INS_JOB)
-    snapshot["logs"] = list(INS_JOB["logs"])
-    return snapshot
+    return dict(INS_JOB)
 
 
 def _ins_snapshot() -> dict:
@@ -171,8 +168,6 @@ def _ins_report(progress: int, message: str) -> None:
     with INS_LOCK:
         INS_JOB["progress"] = max(int(INS_JOB["progress"]), progress)
         INS_JOB["message"] = message
-        INS_JOB["logs"].append(message)
-        INS_JOB["logs"] = INS_JOB["logs"][-120:]
 
 
 def _clear_removed_entry() -> None:
@@ -184,14 +179,7 @@ def _clear_removed_entry() -> None:
 def _run_ins_job(db_path: str | Path, conf_path: Path) -> None:
     try:
         result = run_ingestion(db_path, conf_path, progress=_ins_report)
-        failed_suffix = (
-            f"，{result.failed_feeds} 个源失败"
-            if result.failed_feeds else ""
-        )
-        message = (
-            f"拉取完成: {result.changed_entries}/"
-            f"{result.normalized_entries} 条更新{failed_suffix}"
-        )
+        message = f"写入 {result.changed_entries}/{result.normalized_entries} 条"
         _ins_report(100, message)
         _ins_update(
             state="succeeded",
@@ -809,7 +797,6 @@ class InfoHandler(SimpleHTTPRequestHandler):
             INS_JOB["message"] = "启动中"
             INS_JOB["started_at"] = _utcnow_iso()
             INS_JOB["ended_at"] = None
-            INS_JOB["logs"] = []
 
         worker = threading.Thread(
             target=_run_ins_job,

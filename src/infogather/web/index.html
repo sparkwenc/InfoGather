@@ -31,10 +31,6 @@
             <span id="ins-btn-label">拉取更新</span>
           </button>
           <section id="ins-panel" class="ins-panel" hidden data-state="idle">
-            <div class="ins-row">
-              <span id="ins-text" role="status" aria-live="polite">等待中</span>
-              <span id="ins-percent">0%</span>
-            </div>
             <progress
               id="ins-progress"
               class="ins-progress"
@@ -43,13 +39,10 @@
               aria-label="拉取进度"
               aria-describedby="ins-text"
             ></progress>
-            <section id="ins-log-shell" class="ins-log-shell" hidden>
-              <div class="ins-log-header">
-                <span>拉取详情</span>
-                <span id="ins-log-count" class="ins-log-count"></span>
-              </div>
-              <div id="ins-log" class="ins-log" role="log" aria-live="polite"></div>
-            </section>
+            <div class="ins-current">
+              <span class="ins-spinner" aria-hidden="true"></span>
+              <span id="ins-text" role="status" aria-live="polite">等待中</span>
+            </div>
           </section>
         </div>
         <p id="tree-root" class="tree-root">正在读取配置源...</p>

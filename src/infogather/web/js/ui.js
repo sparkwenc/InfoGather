@@ -44,10 +44,7 @@ let cardSequence = 0;
   }
 
   function renderInsJob(elements, job) {
-    const {
-      insPanel, insBtn, insPercent, insProgress, insText,
-      insLog, insLogShell, insLogCount
-    } = elements;
+    const { insPanel, insBtn, insProgress, insText } = elements;
     const insBtnLabel = insBtn.querySelector("#ins-btn-label");
 
     if (!job || (job.state === "idle" && !job.started_at)) {
@@ -60,40 +57,8 @@ let cardSequence = 0;
     insPanel.hidden = false;
     insPanel.dataset.state = job.state || "idle";
     const progress = Math.max(0, Math.min(100, Number(job.progress || 0)));
-    insPercent.textContent = `${progress}%`;
     insProgress.value = progress;
-
-    let prefix = "状态";
-    if (job.state === "running") prefix = "拉取中";
-    if (job.state === "succeeded") prefix = "已完成";
-    if (job.state === "failed") prefix = "失败";
-    insText.textContent = `${prefix}: ${job.message || ""}`;
-    const logs = Array.isArray(job.logs) ? job.logs : [];
-    const rows = logs.map((message) => {
-      const row = document.createElement("div");
-      row.className = "ins-log-item";
-      if (message.includes("失败")) row.dataset.tone = "failed";
-      else if (
-        message.includes("完成")
-        || message.includes("写入:")
-        || /: 拉取 \d+ 条/.test(message)
-      ) {
-        row.dataset.tone = "success";
-      } else if (message.includes("使用缓存") || message.includes("无更新")) {
-        row.dataset.tone = "cached";
-      }
-      const marker = document.createElement("span");
-      marker.className = "ins-log-marker";
-      marker.setAttribute("aria-hidden", "true");
-      const text = document.createElement("span");
-      text.textContent = message;
-      row.append(marker, text);
-      return row;
-    });
-    insLog.replaceChildren(...rows);
-    insLogShell.hidden = logs.length === 0;
-    insLogCount.textContent = String(logs.length);
-    if (logs.length) insLog.scrollTop = insLog.scrollHeight;
+    insText.textContent = job.message || "处理中";
 
     const running = job.state === "running";
     insBtn.disabled = running;
