@@ -23,6 +23,7 @@ class WebModuleTests(unittest.TestCase):
               return { ok: true, status: 200, json: async () => ({}) };
             };
             const controller = new AbortController();
+            await api.getInsStatus(controller.signal);
             await api.getEntries(new URLSearchParams("q=test"), controller.signal);
             await api.getTagTree(new URLSearchParams(), controller.signal);
             if (calls.some(([, options]) => options.signal !== controller.signal)) {

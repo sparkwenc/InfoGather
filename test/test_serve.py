@@ -120,6 +120,29 @@ class ServeInsTests(unittest.TestCase):
             "拉取完成: 2/3 条更新，1 个源失败",
         )
 
+    def test_ins_run_can_return_an_already_completed_job(self) -> None:
+        class ImmediateThread:
+            def __init__(self, *, target, args, daemon):
+                self.target = target
+                self.args = args
+
+            def start(self):
+                self.target(*self.args)
+
+        result = IngestionResult(0, 0, 0, 0, 0)
+        with tempfile.TemporaryDirectory() as td:
+            with serve.INS_LOCK:
+                serve.INS_JOB["state"] = "idle"
+            harness = HandlerHarness(Path(td) / "entries.db", {})
+            with (
+                mock.patch.object(serve.threading, "Thread", ImmediateThread),
+                mock.patch.object(serve, "run_ingestion", return_value=result),
+            ):
+                harness._handle_ins_run()
+
+        self.assertEqual(harness.status, HTTPStatus.OK)
+        self.assertEqual(harness.response["job"]["state"], "succeeded")
+
     def test_web_assets_are_packaged_with_server(self) -> None:
         self.assertTrue((serve.WEB_DIR / "index.html").is_file())
         index = (serve.WEB_DIR / "index.html").read_text()

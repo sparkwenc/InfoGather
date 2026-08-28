@@ -12,6 +12,8 @@ const state = {
   loading: false,
   entriesRequest: null,
   refreshController: null,
+  refreshInFlight: null,
+  refreshOnVisible: false,
   selectedSelectors: new Set(),
   favoredOnly: false,
   unnoticedOnly: false,
@@ -24,7 +26,10 @@ const state = {
   mutating: false,
   insPollTimer: null,
   insStatusPromise: null,
-  insWasRunning: false
+  insStatusController: null,
+  insWasRunning: false,
+  insLastCompletion: null,
+  insRunStarting: false
 };
 
 const metaEl = document.getElementById("meta");
@@ -98,6 +103,15 @@ function startInsPolling(delay = 900) {
   }, delay);
 }
 
+function pauseInsPolling() {
+  stopInsPolling();
+  state.insStatusController?.abort();
+  if (state.refreshInFlight || state.entriesRequest) {
+    state.refreshController?.abort();
+    state.refreshOnVisible = true;
+  }
+}
+
 function renderTree() {
   clearTagsEl.disabled = state.selectedSelectors.size === 0;
   ui.renderTree(treeListEl, state, {
@@ -134,10 +148,16 @@ async function refreshFilteredView() {
   state.refreshController?.abort();
   const controller = new AbortController();
   state.refreshController = controller;
-  await Promise.all([
-    loadTagTree(controller.signal),
-    fetchEntries({ reset: true, signal: controller.signal })
-  ]);
+  state.refreshInFlight = controller;
+  try {
+    const results = await Promise.all([
+      loadTagTree(controller.signal),
+      fetchEntries({ reset: true, signal: controller.signal })
+    ]);
+    return !controller.signal.aborted && results.every(Boolean);
+  } finally {
+    if (state.refreshInFlight === controller) state.refreshInFlight = null;
+  }
 }
 
 function renderEntries(items, { reset }) {
@@ -177,8 +197,32 @@ function renderEntries(items, { reset }) {
   listEl.append(...items.map(ui.makeCard));
 }
 
-async function pollInsStatus() {
-  if (document.hidden) return;
+async function applyInsJob(job, { refreshCompleted = true } = {}) {
+  state.insWasRunning = job.state === "running";
+  ui.renderInsJob(insElements, job);
+  let retryRefresh = false;
+
+  const completion = job.state === "succeeded"
+    ? (job.ended_at || job.started_at)
+    : null;
+  if (completion && completion !== state.insLastCompletion) {
+    if (refreshCompleted && !document.hidden) {
+      if (await refreshFilteredView()) {
+        state.insLastCompletion = completion;
+      } else {
+        retryRefresh = true;
+      }
+    }
+  }
+
+  if (!state.insWasRunning) {
+    stopInsPolling();
+    if (retryRefresh) startInsPolling(2000);
+  }
+}
+
+async function pollInsStatus({ refreshCompleted = true } = {}) {
+  if (state.insRunStarting || document.hidden) return;
   if (state.insStatusPromise) {
     try {
       await state.insStatusPromise;
@@ -188,48 +232,55 @@ async function pollInsStatus() {
     return;
   }
 
+  const controller = new AbortController();
+  state.insStatusController = controller;
   const request = (async () => {
-    const payload = await api.getInsStatus();
+    const payload = await api.getInsStatus(controller.signal);
+    if (controller.signal.aborted) return;
     const job = payload.job || {};
-
-    const wasRunning = state.insWasRunning;
-    state.insWasRunning = job.state === "running";
-    ui.renderInsJob(insElements, job);
-
-    if (wasRunning && job.state === "succeeded") {
-      await refreshFilteredView();
-    }
-
-    if (job.state !== "running") {
-      state.insWasRunning = false;
-      stopInsPolling();
-    }
+    await applyInsJob(job, { refreshCompleted });
   })();
   state.insStatusPromise = request;
   try {
     await request;
   } catch (err) {
-    console.error(err);
+    if (err.name !== "AbortError") console.error(err);
   } finally {
     if (state.insStatusPromise === request) state.insStatusPromise = null;
+    if (state.insStatusController === controller) {
+      state.insStatusController = null;
+    }
     if (state.insWasRunning) startInsPolling();
   }
 }
 
 async function runIns() {
+  if (state.insRunStarting) return;
+  state.insRunStarting = true;
   insBtn.disabled = true;
   try {
-    if (state.insStatusPromise) await pollInsStatus();
+    stopInsPolling();
+    if (state.insStatusPromise) {
+      try {
+        await state.insStatusPromise;
+      } catch (err) {
+        if (err.name !== "AbortError") console.error(err);
+      }
+    }
+    stopInsPolling();
+    insBtn.disabled = true;
     const payload = await api.runIns();
     const job = payload.job || {};
-    ui.renderInsJob(insElements, job);
-    state.insWasRunning = job.state === "running";
     stopInsPolling();
-    await pollInsStatus();
+    await applyInsJob(job);
+    state.insRunStarting = false;
+    if (state.insWasRunning) await pollInsStatus();
   } catch (err) {
     insBtn.disabled = false;
     console.error(err);
     window.alert("启动拉取失败，请稍后重试。");
+  } finally {
+    state.insRunStarting = false;
   }
 }
 
@@ -356,17 +407,20 @@ async function loadTagTree(signal) {
     treeRootEl.textContent = `${root.name}（${root.group_count} 类 / ${root.source_count} 源 / ${root.count} 条）`;
     state.treeGroups = Array.isArray(payload.groups) ? payload.groups : [];
     renderTree();
+    return true;
   } catch (err) {
-    if (signal.aborted) return;
+    if (signal.aborted) return false;
     treeRootEl.textContent = "配置源 (加载失败)";
     treeListEl.innerHTML = '<li class="tree-item tree-empty">无法读取来源列表</li>';
     console.error(err);
+    return false;
   }
 }
 
 async function fetchEntries({ reset = false, signal } = {}) {
-  if (!reset && state.entriesRequest) return;
+  if (!reset && state.entriesRequest) return false;
   const request = {};
+  let succeeded = false;
   state.entriesRequest = request;
   state.loading = true;
   listEl.setAttribute("aria-busy", "true");
@@ -393,25 +447,29 @@ async function fetchEntries({ reset = false, signal } = {}) {
       ? payload.next_cursor
       : null;
     state.hasMore = payload.has_more === true;
+    succeeded = true;
   } catch (err) {
-    if (signal?.aborted || state.entriesRequest !== request) return;
-    if (reset || !listEl.children.length) {
-      state.offset = 0;
-      state.total = null;
-      state.cursor = null;
-      state.hasMore = false;
-      listEl.innerHTML = '<p class="empty">读取失败，请确认本地服务已启动。</p>';
+    if (!signal?.aborted && state.entriesRequest === request) {
+      if (reset || !listEl.children.length) {
+        state.offset = 0;
+        state.total = null;
+        state.cursor = null;
+        state.hasMore = false;
+        listEl.innerHTML = '<p class="empty">读取失败，请确认本地服务已启动。</p>';
+      }
+      console.error(err);
     }
-    console.error(err);
   } finally {
-    if (state.entriesRequest !== request) return;
-    ui.setMeta(metaEl, state);
-    moreEl.hidden = !state.hasMore;
-    state.loading = false;
-    state.entriesRequest = null;
-    if (!state.mutating) listEl.removeAttribute("aria-busy");
-    moreEl.disabled = false;
+    if (state.entriesRequest === request) {
+      ui.setMeta(metaEl, state);
+      moreEl.hidden = !state.hasMore;
+      state.loading = false;
+      state.entriesRequest = null;
+      if (!state.mutating) listEl.removeAttribute("aria-busy");
+      moreEl.disabled = false;
+    }
   }
+  return succeeded;
 }
 
 insBtn.addEventListener("click", runIns);
@@ -510,10 +568,34 @@ moreEl.addEventListener("click", () => {
 
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
-    stopInsPolling();
+    pauseInsPolling();
   } else {
-    void pollInsStatus();
+    void (async () => {
+      const refreshOnVisible = state.refreshOnVisible;
+      const completionBeforePoll = state.insLastCompletion;
+      state.refreshOnVisible = false;
+      if (state.insStatusPromise) await pollInsStatus();
+      stopInsPolling();
+      await pollInsStatus();
+      if (document.hidden) {
+        state.refreshOnVisible ||= refreshOnVisible;
+        return;
+      }
+      if (
+        refreshOnVisible
+        && state.insLastCompletion === completionBeforePoll
+      ) {
+        await refreshFilteredView();
+      }
+    })();
   }
 });
 
-void pollInsStatus().then(refreshFilteredView);
+void (async () => {
+  await pollInsStatus({ refreshCompleted: false });
+  if (document.hidden) {
+    state.refreshOnVisible = true;
+    return;
+  }
+  if (!await refreshFilteredView()) startInsPolling(2000);
+})();
