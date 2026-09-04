@@ -9,6 +9,7 @@ from .filters import parse_updated
 
 SCHEMA_VERSION = 6
 BUSY_TIMEOUT_MS = 10_000
+MMAP_SIZE_BYTES = 256 * 1024 * 1024
 SQLITE_INT_MAX = 2 ** 63 - 1
 MAX_SOURCE_TYPE_LENGTH = 512
 MAX_SOURCE_ID_LENGTH = 4096
@@ -367,6 +368,8 @@ class InfoStorage:
         conn = self._get_conn()
         conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
         conn.execute("PRAGMA foreign_keys = ON")
+        if not self._memory:
+            conn.execute(f"PRAGMA mmap_size = {MMAP_SIZE_BYTES}")
         if self._read_only:
             return
         if initialize and not self._memory:
