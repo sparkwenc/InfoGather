@@ -743,6 +743,40 @@ class InfoStorageTests(unittest.TestCase):
             self.assertEqual(storage.query_entries(query_text="ta")["total"], 0)
             self.assertEqual(storage.query_entries(query_text="au")["total"], 1)
 
+    def test_search_prefilter_preserves_exact_search_semantics(self) -> None:
+        entry = _entry(
+            version=1,
+            title='Mixed CASE 100%_ "quoted" \\ path\nnext',
+            tags=["math.AG"],
+        )
+        entry["content"]["auth"] = "Distinct Author"
+        entry["content"]["abst"] = "Unique abstract"
+        with InfoStorage(":memory:") as storage:
+            with redirect_stdout(io.StringIO()):
+                storage.insert_entries([entry])
+            results = {
+                query: storage.query_entries(query_text=query)["total"]
+                for query in (
+                    "mixed", "CASE", "100%_", '"quoted"', "\\ path",
+                    "path\nnext", "distinct", "unique", "math.ag",
+                    "2601.00001", "arxiv.org",
+                )
+            }
+
+        self.assertEqual(results, {
+            "mixed": 1,
+            "CASE": 1,
+            "100%_": 1,
+            '"quoted"': 1,
+            "\\ path": 1,
+            "path\nnext": 1,
+            "distinct": 1,
+            "unique": 1,
+            "math.ag": 1,
+            "2601.00001": 1,
+            "arxiv.org": 0,
+        })
+
     def test_read_only_legacy_schema_raises_clear_error(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "entries.db"

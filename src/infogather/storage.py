@@ -945,8 +945,7 @@ class InfoStorage:
             params.extend(selector_params)
         clean_query = query_text.strip().lower()
         if clean_query:
-            conditions.append(
-                """instr(lower(
+            exact_query = """instr(lower(
                     e.srce_id || ' ' ||
                     coalesce(json_extract(e.content, '$.titl'), '') || ' ' ||
                     coalesce(json_extract(e.content, '$.auth'), '') || ' ' ||
@@ -957,8 +956,25 @@ class InfoStorage:
                         WHERE type = 'text'
                     ), '')
                 ), ?) > 0"""
-            )
-            params.append(clean_query)
+            if (
+                not any(char.isspace() or char in {'"', '\\'} or ord(char) < 32
+                        for char in clean_query)
+                and any(char not in "0123456789.e+-" for char in clean_query)
+            ):
+                pattern = "%" + clean_query.replace(
+                    "%", "\\%"
+                ).replace("_", "\\_") + "%"
+                conditions.append(
+                    f"""CASE WHEN
+                        instr(lower(e.srce_id), ?) > 0
+                        OR e.content LIKE ? ESCAPE '\\'
+                    THEN {exact_query}
+                    ELSE 0 END"""
+                )
+                params.extend([clean_query, pattern, clean_query])
+            else:
+                conditions.append(exact_query)
+                params.append(clean_query)
         return conditions, params
 
     def _update_flag_if_current(
