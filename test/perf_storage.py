@@ -28,9 +28,10 @@ DATABASE_BUDGET_FLOOR_SECONDS = {
     "db_first_page": 0.005,
     "db_search": 0.350,
     "db_facets": 0.120,
-    "db_search_facets": 0.700,
+    "db_search_facets": 0.350,
     "api_entries": 0.020,
     "api_facets": 0.150,
+    "api_search_facets": 0.450,
     "api_flag_write": 0.010,
 }
 DATABASE_BUDGET_SCAN_MULTIPLIER = {
@@ -39,9 +40,10 @@ DATABASE_BUDGET_SCAN_MULTIPLIER = {
     "db_first_page": 0.15,
     "db_search": 10,
     "db_facets": 3.5,
-    "db_search_facets": 20,
+    "db_search_facets": 10,
     "api_entries": 0.5,
     "api_facets": 4,
+    "api_search_facets": 11,
     "api_flag_write": 0.3,
 }
 FRONTEND_BUDGETS = {
@@ -286,6 +288,9 @@ class PerformanceBaselineTests(unittest.TestCase):
                 ),
                 "api_facets": _median_seconds(
                     lambda: request("GET", "/api/tag-tree")
+                ),
+                "api_search_facets": _median_seconds(
+                    lambda: request("GET", "/api/tag-tree?q=needle")
                 ),
                 "api_flag_write": _median_seconds(write_flags) / 10,
             }

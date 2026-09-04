@@ -716,6 +716,25 @@ class InfoStorageTests(unittest.TestCase):
         self.assertEqual(facets["group_counts"], [1])
         self.assertEqual(restored["total"], 1)
 
+    def test_facets_count_entries_without_configured_tags(self) -> None:
+        with InfoStorage(":memory:") as storage:
+            with redirect_stdout(io.StringIO()):
+                storage.insert_entries([
+                    _entry(version=1, srce_id="2601.00001", tags=["math.AG"]),
+                    _entry(version=1, srce_id="2601.00002", tags=["math.OTHER"]),
+                ])
+            facets = storage.query_facets(
+                configured_tags={"math.AG"},
+                groups=[{"math.AG"}],
+                query_text="title",
+            )
+
+        self.assertEqual(facets, {
+            "total": 2,
+            "tag_counts": {"math.AG": 1},
+            "group_counts": [1],
+        })
+
     def test_short_search_does_not_match_json_field_names(self) -> None:
         with InfoStorage(":memory:") as storage:
             with redirect_stdout(io.StringIO()):

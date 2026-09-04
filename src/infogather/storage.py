@@ -300,10 +300,6 @@ class InfoStorage:
         conn = self._get_conn()
         with conn:
             conn.execute("BEGIN")
-            total = conn.execute(
-                f"SELECT COUNT(*) FROM tab_entries AS e{self._where_sql(where)}",
-                params,
-            ).fetchone()[0]
             tag_counts: dict[str, int] = {}
             group_counts = [0] * len(groups)
             if configured_tags:
@@ -313,15 +309,13 @@ class InfoStorage:
                     f"""
                     SELECT e.rowid AS entry_id, t.value AS tag
                     FROM tab_entries AS e
-                    JOIN json_each(e.content, '$.tags') AS t
-                    {self._where_sql([
-                        *where,
-                        "t.type = 'text'",
-                        f"t.value IN ({placeholders})",
-                    ])}
+                    LEFT JOIN json_each(e.content, '$.tags') AS t
+                        ON t.type = 'text'
+                        AND t.value IN ({placeholders})
+                    {self._where_sql(where)}
                     ORDER BY e.rowid
                     """,
-                    [*params, *sorted_tags],
+                    [*sorted_tags, *params],
                 )
                 group_indexes = {
                     tag: [
@@ -332,9 +326,16 @@ class InfoStorage:
                 }
                 last_tag_entry: dict[str, int] = {}
                 last_group_entry: list[int | None] = [None] * len(groups)
+                last_entry: int | None = None
+                total = 0
                 for row in cursor:
                     entry_id = int(row["entry_id"])
-                    tag = str(row["tag"])
+                    if last_entry != entry_id:
+                        total += 1
+                        last_entry = entry_id
+                    if row["tag"] is None:
+                        continue
+                    tag = row["tag"]
                     if last_tag_entry.get(tag) != entry_id:
                         tag_counts[tag] = tag_counts.get(tag, 0) + 1
                         last_tag_entry[tag] = entry_id
@@ -342,6 +343,11 @@ class InfoStorage:
                         if last_group_entry[index] != entry_id:
                             group_counts[index] += 1
                             last_group_entry[index] = entry_id
+            else:
+                total = conn.execute(
+                    f"SELECT COUNT(*) FROM tab_entries AS e{self._where_sql(where)}",
+                    params,
+                ).fetchone()[0]
         return {
             "total": int(total),
             "tag_counts": tag_counts,
