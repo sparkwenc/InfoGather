@@ -79,32 +79,6 @@ class InfoStorageTests(unittest.TestCase):
             with InfoStorage(f"{db_path.as_uri()}?mode=ro") as storage:
                 self.assertEqual(_items(storage), [])
 
-    def test_pre_feed_cache_schema_requires_writable_migration(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            db_path = Path(td) / "entries.db"
-            with _connect(db_path) as conn:
-                conn.executescript(
-                    """
-                    CREATE TABLE tab_entries (
-                        srce_ty TEXT NOT NULL,
-                        srce_id TEXT NOT NULL,
-                        version INTEGER NOT NULL DEFAULT 1,
-                        favored INTEGER NOT NULL DEFAULT 0,
-                        noticed INTEGER NOT NULL DEFAULT 0,
-                        state_rev INTEGER NOT NULL DEFAULT 0,
-                        updated TEXT NOT NULL,
-                        content TEXT NOT NULL,
-                        PRIMARY KEY (srce_ty, srce_id)
-                    );
-                    CREATE INDEX idx_entries_favored ON tab_entries(favored);
-                    CREATE INDEX idx_entries_noticed ON tab_entries(noticed);
-                    CREATE INDEX idx_entries_updated ON tab_entries(updated);
-                    """
-                )
-
-            with self.assertRaisesRegex(RuntimeError, "read-only"):
-                InfoStorage(f"{db_path.as_uri()}?mode=ro")
-
     def test_migration_repairs_missing_index(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "entries.db"

@@ -11,10 +11,10 @@ if (CHECKOUT_ROOT / "pyproject.toml").is_file():
     DEFAULT_CONFIG_PATH = CHECKOUT_ROOT / "conf" / "config.toml"
 else:
     data_home = Path(
-        os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")
+        os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share"
     )
     config_home = Path(
-        os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")
+        os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"
     )
     user_config = config_home / "infogather" / "config.toml"
     DEFAULT_DB_PATH = data_home / "infogather" / "entries.db"

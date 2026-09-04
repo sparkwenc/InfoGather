@@ -2,6 +2,7 @@ from .storage import (
     InfoStorage,
     MAX_SOURCE_ID_LENGTH,
     MAX_SOURCE_TYPE_LENGTH,
+    SQLITE_INT_MAX,
 )
 from .paths import DEFAULT_CONFIG_PATH, DEFAULT_DB_PATH, WEB_DIR
 from .ingestion import run_ingestion
@@ -33,7 +34,8 @@ INS_JOB = {
     "ended_at": None,
 }
 REMOVE_UNDO_LOCK = threading.Lock()
-REMOVE_UNDO = {"token": None, "entry": None}
+REMOVE_UNDO: dict[str, dict] = {}
+MAX_REMOVE_UNDOS = 100
 MAX_JSON_BODY_BYTES = 64 * 1024
 MAX_CURSOR_BYTES = 16_384
 MAX_QUERY_FIELDS = 200
@@ -41,7 +43,6 @@ MAX_QUERY_TEXT_LENGTH = 500
 MAX_SELECTED_TAGS = 100
 MAX_TAG_LENGTH = 256
 SQLITE_INT_MIN = -(2 ** 63)
-SQLITE_INT_MAX = 2 ** 63 - 1
 
 
 def _parse_int(raw: str, default: int, *, min_value: int, max_value: int) -> int:
@@ -91,9 +92,9 @@ def _validate_cursor(value: object) -> tuple[int, str, str]:
         or not isinstance(value[0], int)
         or not SQLITE_INT_MIN <= value[0] <= SQLITE_INT_MAX
         or not isinstance(value[1], str)
-        or len(value[1]) > 512
+        or len(value[1]) > MAX_SOURCE_TYPE_LENGTH
         or not isinstance(value[2], str)
-        or len(value[2]) > 4096
+        or len(value[2]) > MAX_SOURCE_ID_LENGTH
     ):
         raise ValueError("invalid cursor")
     return value[0], value[1], value[2]
@@ -107,7 +108,7 @@ def _decode_cursor(raw: str) -> tuple[int, str, str] | None:
     try:
         padded = raw + "=" * (-len(raw) % 4)
         value = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
-    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except ValueError as exc:
         raise ValueError("invalid cursor") from exc
     return _validate_cursor(value)
 
@@ -171,12 +172,6 @@ def _ins_report(progress: int, message: str) -> None:
         INS_JOB["message"] = message
 
 
-def _clear_removed_entry() -> None:
-    with REMOVE_UNDO_LOCK:
-        REMOVE_UNDO["token"] = None
-        REMOVE_UNDO["entry"] = None
-
-
 def _run_ins_job(db_path: str | Path, conf_path: Path) -> None:
     try:
         result = run_ingestion(db_path, conf_path, progress=_ins_report)
@@ -201,10 +196,7 @@ def _load_configured_sources(conf_path: Path) -> list[dict]:
     with conf_path.open("rb") as f:
         conf = tomllib.load(f)
 
-    try:
-        sources = configured_sources(conf)
-    except ValueError:
-        return []
+    sources = configured_sources(conf)
     groups = []
     by_name = {}
     for source in sources:
@@ -215,7 +207,6 @@ def _load_configured_sources(conf_path: Path) -> list[dict]:
             groups.append(group)
         group["children"].append({
             "name": source["name"],
-            "url": source["url"],
             "selector_value": source["selector_value"],
         })
     return groups
@@ -223,12 +214,16 @@ def _load_configured_sources(conf_path: Path) -> list[dict]:
 
 def _normalize_db_path(raw_path: str) -> str | Path:
     if raw_path.startswith("file:"):
+        mode = parse_qs(urlparse(raw_path).query).get("mode", [""])[0]
+        if mode not in {"ro", "rw"}:
+            raise ValueError("SQLite URI mode must be ro or rw")
         return raw_path
     return Path(raw_path).expanduser().resolve()
 
 
 def _is_loopback_host(host: str) -> bool:
-    if host.strip().casefold() == "localhost":
+    host = host.strip()
+    if host.casefold() == "localhost":
         return True
     try:
         return ipaddress.ip_address(host.strip("[]")).is_loopback
@@ -237,9 +232,14 @@ def _is_loopback_host(host: str) -> bool:
 
 
 def _http_authority(value: str) -> tuple[str, int] | None:
-    parsed = urlparse(f"//{value}")
+    try:
+        parsed = urlparse(f"//{value}")
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None
     if (
-        not parsed.hostname
+        not hostname
         or parsed.username is not None
         or parsed.password is not None
         or parsed.path
@@ -248,10 +248,7 @@ def _http_authority(value: str) -> tuple[str, int] | None:
         or parsed.fragment
     ):
         return None
-    try:
-        return parsed.hostname.casefold(), parsed.port or 80
-    except ValueError:
-        return None
+    return hostname.casefold(), port or 80
 
 
 class ThreadingHTTPServerV6(ThreadingHTTPServer):
@@ -260,6 +257,7 @@ class ThreadingHTTPServerV6(ThreadingHTTPServer):
 
 class InfoHandler(SimpleHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    timeout = 60
 
     def __init__(
         self,
@@ -292,6 +290,11 @@ class InfoHandler(SimpleHTTPRequestHandler):
 
     def end_headers(self) -> None:
         parsed = urlparse(self.path)
+        if self.command != "POST" and (
+            self.headers.get("Content-Length") not in (None, "0")
+            or self.headers.get("Transfer-Encoding") is not None
+        ):
+            self.close_connection = True
         if parsed.path.startswith("/api/"):
             self.send_header("Cache-Control", "no-store")
         else:
@@ -312,6 +315,8 @@ class InfoHandler(SimpleHTTPRequestHandler):
             "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
             "base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
         )
+        if self.close_connection:
+            self.send_header("Connection", "close")
         super().end_headers()
 
     def do_GET(self) -> None:
@@ -339,6 +344,8 @@ class InfoHandler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self) -> None:
+        self._close_after_body = self.close_connection
+        self.close_connection = True
         if not self._request_host_is_loopback():
             self._write_json(
                 {"error": "loopback Host required"},
@@ -380,7 +387,10 @@ class InfoHandler(SimpleHTTPRequestHandler):
 
     def _request_is_same_origin(self) -> bool:
         host = _http_authority(self.headers.get("Host", ""))
-        origin = urlparse(self.headers.get("Origin", ""))
+        try:
+            origin = urlparse(self.headers.get("Origin", ""))
+        except ValueError:
+            return False
         origin_authority = _http_authority(origin.netloc)
         return (
             host is not None
@@ -449,18 +459,25 @@ class InfoHandler(SimpleHTTPRequestHandler):
 
         try:
             configured_groups = _load_configured_sources(self._conf_path)
-            configured_tags = {
+        except Exception as exc:
+            self._write_json(
+                {"error": f"failed to read configuration: {exc}"},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+            return
+        configured_tags = {
+            str(child.get("selector_value", ""))
+            for group in configured_groups
+            for child in group.get("children", [])
+        }
+        group_selectors = [
+            {
                 str(child.get("selector_value", ""))
-                for group in configured_groups
                 for child in group.get("children", [])
             }
-            group_selectors = [
-                {
-                    str(child.get("selector_value", ""))
-                    for child in group.get("children", [])
-                }
-                for group in configured_groups
-            ]
+            for group in configured_groups
+        ]
+        try:
             with self._current_storage() as storage:
                 facets = storage.query_facets(
                     configured_tags=configured_tags,
@@ -511,17 +528,22 @@ class InfoHandler(SimpleHTTPRequestHandler):
         )
 
     def _read_json_body(self) -> dict | None:
-        length_raw = self.headers.get("Content-Length", "0")
+        lengths = self.headers.get_all("Content-Length", [])
+        if len(lengths) != 1 or self.headers.get("Transfer-Encoding") is not None:
+            return None
         try:
-            length = int(length_raw)
+            length = int(lengths[0])
         except ValueError:
             return None
         if length <= 0 or length > MAX_JSON_BODY_BYTES:
             return None
         body = self.rfile.read(length)
+        if len(body) != length:
+            return None
+        self.close_connection = getattr(self, "_close_after_body", True)
         try:
             payload = json.loads(body.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
+        except ValueError:
             return None
         return payload if isinstance(payload, dict) else None
 
@@ -564,10 +586,8 @@ class InfoHandler(SimpleHTTPRequestHandler):
         *,
         action_error: str,
         action: Callable[[InfoStorage, str, str], int],
-        success_count_key: str,
-        success_extra: dict[str, object] | None = None,
-        no_change_status: HTTPStatus = HTTPStatus.NOT_FOUND,
-        no_change_error: str = "entry not found",
+        success_extra: dict[str, object],
+        no_change_error: str,
     ) -> None:
         srce_ty, srce_id = self._source_key_from_payload(payload)
         if not srce_ty or not srce_id:
@@ -590,20 +610,17 @@ class InfoHandler(SimpleHTTPRequestHandler):
         if not changed:
             self._write_json(
                 {"error": no_change_error},
-                status=no_change_status,
+                status=HTTPStatus.CONFLICT,
             )
             return
 
-        _clear_removed_entry()
-
         response = {
             "ok": True,
-            success_count_key: int(changed),
+            "updated": int(changed),
             "srce_ty": srce_ty,
             "srce_id": srce_id,
         }
-        if success_extra:
-            response.update(success_extra)
+        response.update(success_extra)
         self._write_json(response)
 
     def _handle_favored(self) -> None:
@@ -642,12 +659,10 @@ class InfoHandler(SimpleHTTPRequestHandler):
             action=lambda storage, srce_ty, srce_id: storage.favor_entry_if_current(
                 srce_ty, srce_id, expected, expected_revision, favored
             ),
-            success_count_key="updated",
             success_extra={
                 "favored": favored,
                 "state_rev": expected_revision + 1,
             },
-            no_change_status=HTTPStatus.CONFLICT,
             no_change_error="entry favored state changed",
         )
 
@@ -687,12 +702,10 @@ class InfoHandler(SimpleHTTPRequestHandler):
             action=lambda storage, srce_ty, srce_id: storage.notice_entry_if_current(
                 srce_ty, srce_id, expected, expected_revision, noticed
             ),
-            success_count_key="updated",
             success_extra={
                 "noticed": noticed,
                 "state_rev": expected_revision + 1,
             },
-            no_change_status=HTTPStatus.CONFLICT,
             no_change_error="entry noticed state changed",
         )
 
@@ -722,8 +735,9 @@ class InfoHandler(SimpleHTTPRequestHandler):
                     )
                 if entry is not None:
                     undo_token = secrets.token_urlsafe(24)
-                    REMOVE_UNDO["token"] = undo_token
-                    REMOVE_UNDO["entry"] = entry
+                    REMOVE_UNDO[undo_token] = entry
+                    if len(REMOVE_UNDO) > MAX_REMOVE_UNDOS:
+                        REMOVE_UNDO.pop(next(iter(REMOVE_UNDO)))
         except Exception as exc:
             self._write_json(
                 {"error": f"failed to remove entry: {exc}"},
@@ -767,14 +781,13 @@ class InfoHandler(SimpleHTTPRequestHandler):
 
         try:
             with REMOVE_UNDO_LOCK:
-                entry = REMOVE_UNDO["entry"]
-                if REMOVE_UNDO["token"] != token or not isinstance(entry, dict):
-                    entry = None
-                else:
+                entry = REMOVE_UNDO.get(token)
+                if isinstance(entry, dict):
                     with self._current_storage() as storage:
                         restored = storage.restore_entry(entry)
-                    REMOVE_UNDO["token"] = None
-                    REMOVE_UNDO["entry"] = None
+                    REMOVE_UNDO.pop(token, None)
+                else:
+                    entry = None
         except Exception as exc:
             self._write_json(
                 {"error": f"failed to restore entry: {exc}"},
@@ -803,6 +816,12 @@ class InfoHandler(SimpleHTTPRequestHandler):
         self._write_json({"ok": True, "job": _ins_snapshot()})
 
     def _handle_ins_run(self) -> None:
+        if self._read_json_body() is None:
+            self._write_json(
+                {"error": "invalid JSON body"},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
         with INS_LOCK:
             if INS_JOB["state"] == "running":
                 running_snapshot = _ins_snapshot_unlocked()
@@ -819,12 +838,24 @@ class InfoHandler(SimpleHTTPRequestHandler):
             INS_JOB["started_at"] = _utcnow_iso()
             INS_JOB["ended_at"] = None
 
-        worker = threading.Thread(
-            target=_run_ins_job,
-            args=(self._db_path, self._conf_path),
-            daemon=True,
-        )
-        worker.start()
+        try:
+            worker = threading.Thread(
+                target=_run_ins_job,
+                args=(self._db_path, self._conf_path),
+                daemon=True,
+            )
+            worker.start()
+        except Exception as exc:
+            _ins_update(
+                state="failed",
+                message=f"启动失败: {exc}",
+                ended_at=_utcnow_iso(),
+            )
+            self._write_json(
+                {"ok": False, "error": "failed to start ingestion"},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+            return
         self._write_json({"ok": True, "job": _ins_snapshot()})
 
     def _write_json(self, payload: dict, *, status: HTTPStatus = HTTPStatus.OK) -> None:
@@ -847,12 +878,17 @@ def main() -> int:
     if not _is_loopback_host(args.host):
         parser.error("--host must be a loopback address or localhost")
 
-    db_path = _normalize_db_path(args.db_path)
+    try:
+        db_path = _normalize_db_path(args.db_path)
+    except ValueError as exc:
+        parser.error(str(exc))
     conf_path = Path(args.conf).expanduser().resolve()
     with InfoStorage(db_path):
         pass
     handler = partial(InfoHandler, db_path=db_path, conf_path=conf_path)
-    bind_host = args.host.strip("[]")
+    bind_host = args.host.strip().strip("[]")
+    if bind_host.casefold() == "localhost":
+        bind_host = "localhost"
     server_class = (
         ThreadingHTTPServerV6
         if ipaddress.ip_address(bind_host).version == 6

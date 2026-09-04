@@ -57,8 +57,7 @@ class IngestionTests(unittest.TestCase):
             }
 
             def __init__(self, config, *, feed_states):
-                self.config = config
-                self.feed_states = feed_states
+                pass
 
             def get_normalized_feeds(self, progress=None):
                 if progress is not None:

@@ -9,7 +9,6 @@ const state = {
   cursor: null,
   hasMore: false,
   appliedQuery: "",
-  loading: false,
   entriesRequest: null,
   refreshController: null,
   refreshInFlight: null,
@@ -80,7 +79,7 @@ function beginMutation() {
 
 function endMutation() {
   state.mutating = false;
-  if (!state.loading) listEl.removeAttribute("aria-busy");
+  if (!state.entriesRequest) listEl.removeAttribute("aria-busy");
   renderUndo();
 }
 
@@ -147,7 +146,8 @@ function scheduleTreeRefresh() {
   clearTimeout(state.treeRefreshTimer);
   state.treeRefreshTimer = setTimeout(() => {
     state.treeRefreshTimer = null;
-    if (!document.hidden) void loadTagTree();
+    if (document.hidden) state.refreshOnVisible = true;
+    else void refreshFilteredView();
   }, 250);
 }
 
@@ -307,7 +307,10 @@ async function pollInsStatus({ refreshCompleted = true } = {}) {
   try {
     await request;
   } catch (err) {
-    if (err.name !== "AbortError") console.error(err);
+    if (err.name !== "AbortError") {
+      console.error(err);
+      startInsPolling(2000);
+    }
   } finally {
     if (state.insStatusPromise === request) state.insStatusPromise = null;
     if (state.insStatusController === controller) {
@@ -334,7 +337,6 @@ async function runIns() {
     insBtn.disabled = true;
     const payload = await api.runIns();
     const job = payload.job || {};
-    stopInsPolling();
     await applyInsJob(job);
     state.insRunStarting = false;
     if (state.insWasRunning) await pollInsStatus();
@@ -353,8 +355,10 @@ async function updateFlag(item, field, value, btnEl) {
   const previousRevision = Number(item.state_rev || 0);
   const restoreFocus = btnEl.matches(":focus-visible");
   const update = field === "favored" ? api.setFavored : api.setNoticed;
-  const card = btnEl.closest(".card");
+  const refreshAtStart = state.refreshController;
+  refreshAtStart?.abort();
   let remainsVisible = true;
+  let refreshed = false;
   let succeeded = false;
   btnEl.disabled = true;
   try {
@@ -363,7 +367,20 @@ async function updateFlag(item, field, value, btnEl) {
     );
     item[field] = value;
     item.state_rev = response.state_rev;
-    remainsVisible = updateRenderedEntry(item, card);
+    if (state.refreshController !== refreshAtStart) {
+      remainsVisible = await refreshFilteredView();
+      refreshed = true;
+    } else {
+      const card = findRenderedEntry(item);
+      const renderedItem = card?._liveItem;
+      if (renderedItem) {
+        renderedItem[field] = value;
+        renderedItem.state_rev = response.state_rev;
+        remainsVisible = updateRenderedEntry(renderedItem, card);
+      } else {
+        remainsVisible = false;
+      }
+    }
     setLastUndo({
       type: field,
       srceTy: item.srce_ty,
@@ -375,10 +392,10 @@ async function updateFlag(item, field, value, btnEl) {
         ? (value === 1 ? "撤销收藏" : "撤销取消收藏")
         : (value === 1 ? "撤销标为已读" : "撤销标为未读")
     });
-    if (
+    if (!refreshed && (
       (field === "favored" && state.favoredOnly)
       || (field === "noticed" && state.unnoticedOnly)
-    ) {
+    )) {
       scheduleTreeRefresh();
     }
     succeeded = true;
@@ -501,7 +518,6 @@ async function fetchEntries({ reset = false, signal } = {}) {
   const request = {};
   let succeeded = false;
   state.entriesRequest = request;
-  state.loading = true;
   listEl.setAttribute("aria-busy", "true");
   moreEl.disabled = true;
 
@@ -542,7 +558,6 @@ async function fetchEntries({ reset = false, signal } = {}) {
     if (state.entriesRequest === request) {
       ui.setMeta(metaEl, state);
       moreEl.hidden = !state.hasMore;
-      state.loading = false;
       state.entriesRequest = null;
       if (!state.mutating) listEl.removeAttribute("aria-busy");
       moreEl.disabled = false;
@@ -639,10 +654,7 @@ searchForm.addEventListener("submit", (event) => {
 });
 
 moreEl.addEventListener("click", () => {
-  void fetchEntries({
-    reset: false,
-    signal: state.refreshController?.signal
-  });
+  void fetchEntries({ reset: false });
 });
 
 document.addEventListener("visibilitychange", () => {

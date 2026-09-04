@@ -16,7 +16,6 @@ class FakeClassList {
 
 class FakeElement {
   constructor(tagName) {
-    this.tagName = tagName;
     this.children = [];
     this.dataset = {};
     this.className = "";
@@ -165,5 +164,6 @@ const measurements = {
     { state: "running", progress: 50, message: "Source: 拉取 50 条" }
   ))
 };
+if (mathRenderCount !== 1) throw new Error("plain cards rendered math");
 
 process.stdout.write(JSON.stringify(measurements));

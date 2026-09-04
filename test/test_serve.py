@@ -1,5 +1,6 @@
 import io
 import json
+import socket
 import tempfile
 import threading
 import unittest
@@ -149,6 +150,21 @@ class ServeInsTests(unittest.TestCase):
         self.assertEqual(harness.status, HTTPStatus.OK)
         self.assertEqual(harness.response["job"]["state"], "succeeded")
 
+    def test_ins_run_recovers_when_worker_cannot_start(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            with serve.INS_LOCK:
+                serve.INS_JOB["state"] = "idle"
+            harness = HandlerHarness(Path(td) / "entries.db", {})
+            with mock.patch.object(
+                serve.threading,
+                "Thread",
+                side_effect=RuntimeError("thread unavailable"),
+            ):
+                harness._handle_ins_run()
+
+        self.assertEqual(harness.status, HTTPStatus.INTERNAL_SERVER_ERROR)
+        self.assertEqual(serve.INS_JOB["state"], "failed")
+
     def test_web_assets_are_packaged_with_server(self) -> None:
         self.assertTrue((serve.WEB_DIR / "index.html").is_file())
         index = (serve.WEB_DIR / "index.html").read_text()
@@ -158,7 +174,7 @@ class ServeInsTests(unittest.TestCase):
         )
 
     def test_server_accepts_only_loopback_bindings(self) -> None:
-        for host in ("127.0.0.1", "::1", "localhost"):
+        for host in ("127.0.0.1", "::1", "localhost", " LOCALHOST "):
             self.assertTrue(_is_loopback_host(host))
         for host in ("0.0.0.0", "::", "192.168.1.2", "example.com"):
             self.assertFalse(_is_loopback_host(host))
@@ -248,6 +264,28 @@ class ServeInsTests(unittest.TestCase):
                     body=payload,
                     headers={"Content-Type": "text/plain", "Origin": origin},
                 )
+                malformed_host, _ = _request(
+                    server,
+                    "GET",
+                    "/api/health",
+                    headers={"Host": "["},
+                )
+                malformed_origin, _ = _request(
+                    server,
+                    "POST",
+                    "/api/favored",
+                    body=payload,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Origin": "http://[",
+                    },
+                )
+                body_get, _ = _request(
+                    server,
+                    "GET",
+                    "/api/health",
+                    body="unexpected",
+                )
                 accepted, accepted_body = _request(
                     server,
                     "POST",
@@ -266,6 +304,10 @@ class ServeInsTests(unittest.TestCase):
         self.assertEqual(rebound_post.status, HTTPStatus.MISDIRECTED_REQUEST)
         self.assertEqual(missing_origin.status, HTTPStatus.FORBIDDEN)
         self.assertEqual(wrong_type.status, HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
+        self.assertEqual(wrong_type.getheader("Connection"), "close")
+        self.assertEqual(malformed_host.status, HTTPStatus.MISDIRECTED_REQUEST)
+        self.assertEqual(malformed_origin.status, HTTPStatus.FORBIDDEN)
+        self.assertEqual(body_get.getheader("Connection"), "close")
         self.assertEqual(accepted.status, HTTPStatus.OK)
         self.assertTrue(accepted_body["ok"])
 
@@ -273,6 +315,77 @@ class ServeInsTests(unittest.TestCase):
         uri = "file:///tmp/entries.db?mode=ro"
 
         self.assertEqual(_normalize_db_path(uri), uri)
+        with self.assertRaisesRegex(ValueError, "mode"):
+            _normalize_db_path("file:///tmp/entries.db?mode=rwc")
+
+    def test_ins_run_consumes_body_before_reusing_connection(self) -> None:
+        result = IngestionResult(0, 0, 0, 0, 0)
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "entries.db"
+            _seed_entry(db_path)
+            with serve.INS_LOCK:
+                serve.INS_JOB["state"] = "idle"
+            with (
+                mock.patch.object(serve, "run_ingestion", return_value=result),
+                _running_server(db_path) as server,
+            ):
+                connection = HTTPConnection(*server.server_address, timeout=5)
+                origin = f"http://127.0.0.1:{server.server_port}"
+                try:
+                    connection.request(
+                        "POST",
+                        "/api/ins/run",
+                        body="{}",
+                        headers={
+                            "Content-Type": "application/json",
+                            "Origin": origin,
+                        },
+                    )
+                    started = connection.getresponse()
+                    started.read()
+                    socket_before = connection.sock
+
+                    connection.request("GET", "/api/ins/status")
+                    status = connection.getresponse()
+                    status.read()
+                    self.assertEqual(started.status, HTTPStatus.OK)
+                    self.assertEqual(status.status, HTTPStatus.OK)
+                    self.assertIs(connection.sock, socket_before)
+                finally:
+                    connection.close()
+
+    def test_truncated_json_body_does_not_mutate(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "entries.db"
+            _seed_entry(db_path)
+            with _running_server(db_path) as server:
+                origin = f"http://127.0.0.1:{server.server_port}"
+                body = json.dumps({
+                    "srce_ty": "arXiv",
+                    "srce_id": "2601.00001",
+                    "favored": 1,
+                    "expected_favored": 0,
+                    "expected_revision": 0,
+                }).encode()
+                client = socket.create_connection(server.server_address, timeout=5)
+                try:
+                    client.sendall(
+                        b"POST /api/favored HTTP/1.1\r\n"
+                        + f"Host: 127.0.0.1:{server.server_port}\r\n".encode()
+                        + f"Origin: {origin}\r\n".encode()
+                        + b"Content-Type: application/json\r\n"
+                        + f"Content-Length: {len(body) + 5}\r\n\r\n".encode()
+                        + body
+                    )
+                    client.shutdown(socket.SHUT_WR)
+                    response = client.recv(4096)
+                finally:
+                    client.close()
+            with InfoStorage(db_path) as storage:
+                favored = storage.query_entries()["items"][0]["favored"]
+
+        self.assertIn(b" 400 ", response)
+        self.assertEqual(favored, 0)
 
     def test_load_configured_sources_includes_journal_rss(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -296,6 +409,19 @@ class ServeInsTests(unittest.TestCase):
             "source:Journals:annals",
         )
 
+    def test_tag_tree_reports_configuration_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            db_path = root / "entries.db"
+            _seed_entry(db_path)
+            (root / "config.toml").write_text('arXiv = "invalid"')
+            harness = HandlerHarness(db_path, None)
+
+            harness._handle_tag_tree("")
+
+        self.assertEqual(harness.status, HTTPStatus.INTERNAL_SERVER_ERROR)
+        self.assertIn("configuration", harness.response["error"])
+
     def test_cursor_round_trip_supports_long_ids_and_rejects_big_integers(self) -> None:
         position = (123, "arXiv", "x" * 400)
 
@@ -306,8 +432,7 @@ class ServeInsTests(unittest.TestCase):
 class ServeMutationEndpointTests(unittest.TestCase):
     def setUp(self) -> None:
         with serve.REMOVE_UNDO_LOCK:
-            serve.REMOVE_UNDO["token"] = None
-            serve.REMOVE_UNDO["entry"] = None
+            serve.REMOVE_UNDO.clear()
 
     def test_favored_endpoint_updates_entry(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -523,3 +648,67 @@ class ServeMutationEndpointTests(unittest.TestCase):
             harness._handle_restore_entry()
 
             self.assertEqual(harness.status, HTTPStatus.CONFLICT)
+
+    def test_remove_undos_do_not_invalidate_each_other(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "entries.db"
+            _seed_entry(db_path)
+            with InfoStorage(db_path) as storage, redirect_stdout(io.StringIO()):
+                second = {
+                    "srce_ty": "arXiv",
+                    "srce_id": "2601.00002",
+                    "version": 1,
+                    "updated": "2026-03-02T00:00:00+00:00",
+                    "content": {
+                        "titl": "Second",
+                        "auth": "Author",
+                        "abst": "Abstract",
+                        "tags": ["math.AG"],
+                    },
+                }
+                storage.insert_entries([second])
+
+            removals = []
+            for srce_id in ("2601.00001", "2601.00002"):
+                harness = HandlerHarness(
+                    db_path,
+                    {"srce_ty": "arXiv", "srce_id": srce_id},
+                )
+                harness._handle_remove_entry()
+                removals.append(harness.response["undo_token"])
+
+            for token in removals:
+                harness = HandlerHarness(db_path, {"undo_token": token})
+                harness._handle_restore_entry()
+                self.assertEqual(harness.status, HTTPStatus.OK)
+
+            with InfoStorage(db_path) as storage:
+                self.assertEqual(storage.query_entries()["total"], 2)
+
+    def test_flag_update_does_not_invalidate_remove_undo(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "entries.db"
+            _seed_entry(db_path)
+            remove = HandlerHarness(
+                db_path,
+                {"srce_ty": "arXiv", "srce_id": "2601.00001"},
+            )
+            remove._handle_remove_entry()
+            token = remove.response["undo_token"]
+            _seed_entry(db_path)
+            favored = HandlerHarness(db_path, {
+                "srce_ty": "arXiv",
+                "srce_id": "2601.00001",
+                "favored": 1,
+                "expected_favored": 0,
+                "expected_revision": 0,
+            })
+            favored._handle_favored()
+            self.assertEqual(favored.status, HTTPStatus.OK)
+            with serve.REMOVE_UNDO_LOCK:
+                self.assertIn(token, serve.REMOVE_UNDO)
+
+            restore = HandlerHarness(db_path, {"undo_token": token})
+            restore._handle_restore_entry()
+            self.assertEqual(restore.status, HTTPStatus.OK)
+            self.assertTrue(restore.response["already_present"])

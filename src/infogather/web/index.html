@@ -61,18 +61,18 @@
               <button class="btn btn-primary search-button" type="submit">搜索</button>
             </form>
             <div class="filter-row">
-              <div class="filter-group">
-                <span class="filter-label">状态</span>
+              <div class="filter-group" role="group" aria-labelledby="status-filter-label">
+                <span id="status-filter-label" class="filter-label">状态</span>
                 <button id="favored-btn" class="btn btn-toggle" type="button" aria-pressed="false">仅收藏</button>
                 <button id="unnoticed-btn" class="btn btn-toggle" type="button" aria-pressed="false">仅未读</button>
               </div>
-              <div class="filter-group">
-                <span class="filter-label">更新</span>
+              <div class="filter-group" role="group" aria-labelledby="update-filter-label">
+                <span id="update-filter-label" class="filter-label">更新</span>
                 <button id="day-btn" class="btn btn-toggle" type="button" aria-pressed="false">24 小时</button>
                 <button id="week-btn" class="btn btn-toggle" type="button" aria-pressed="false">7 天</button>
               </div>
-              <div class="filter-group">
-                <span class="filter-label">版本</span>
+              <div class="filter-group" role="group" aria-labelledby="version-filter-label">
+                <span id="version-filter-label" class="filter-label">版本</span>
                 <button id="version-btn" class="btn btn-toggle" type="button" aria-pressed="false">初版 v1</button>
                 <button id="version-not-btn" class="btn btn-toggle" type="button" aria-pressed="false">后续版本</button>
               </div>

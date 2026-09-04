@@ -29,6 +29,17 @@ class WebModuleTests(unittest.TestCase):
             if (calls.some(([, options]) => options.signal !== controller.signal)) {
               process.exit(1);
             }
+            globalThis.fetch = async () => ({
+              ok: true,
+              status: 200,
+              json: async () => { throw new SyntaxError("truncated JSON"); }
+            });
+            try {
+              await api.getEntries(new URLSearchParams());
+              process.exit(1);
+            } catch (error) {
+              if (!(error instanceof SyntaxError)) process.exit(1);
+            }
         """
         subprocess.run(
             ["node", "--input-type=module", "-e", script, modules[0]],

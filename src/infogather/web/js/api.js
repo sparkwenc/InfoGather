@@ -6,7 +6,7 @@ function makeHttpError(resp, payload) {
 
 async function requestJson(url, options, { allowStatuses = [] } = {}) {
   const resp = await fetch(url, options);
-  const payload = await resp.json().catch(() => ({}));
+  const payload = await resp.json();
   if (!resp.ok && !allowStatuses.includes(resp.status)) {
     throw makeHttpError(resp, payload);
   }

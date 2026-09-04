@@ -12,7 +12,7 @@ let cardSequence = 0;
     }
   }
 
-  function renderMath(node, text = node.textContent || "") {
+  function renderMath(node, text) {
     if (!window.renderMathInElement) return;
     if (!/(\$|\\\(|\\\[)/.test(text)) return;
     window.renderMathInElement(node, {
@@ -58,7 +58,8 @@ let cardSequence = 0;
     insPanel.dataset.state = job.state || "idle";
     const progress = Math.max(0, Math.min(100, Number(job.progress || 0)));
     insProgress.value = progress;
-    insText.textContent = job.message || "处理中";
+    const message = job.message || "处理中";
+    if (insText.textContent !== message) insText.textContent = message;
 
     const running = job.state === "running";
     insBtn.disabled = running;

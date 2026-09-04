@@ -46,7 +46,6 @@ class InfoStorage:
             if not path.is_file():
                 raise FileNotFoundError(f"database does not exist: {path}")
             resolved_path = str(path)
-        self._db_path = resolved_path
         self._conn = sqlite3.connect(
             resolved_path,
             uri=is_uri,
@@ -60,7 +59,7 @@ class InfoStorage:
                     f"database schema version {schema_version} is newer than "
                     f"supported version {SCHEMA_VERSION}"
                 )
-            self._configure_connection(raw_path, initialize=_initialize)
+            self._configure_connection(initialize=_initialize)
             if _initialize:
                 self._init_schema(schema_version)
             elif schema_version != SCHEMA_VERSION:
@@ -303,7 +302,7 @@ class InfoStorage:
         has_more = len(rows) > limit
         rows = rows[:limit]
         next_position = None
-        if has_more and rows:
+        if has_more:
             last = rows[-1]
             next_position = (
                 int(last["updated_at_us"]),
@@ -393,7 +392,7 @@ class InfoStorage:
     def _schema_version(self) -> int:
         return int(self._get_conn().execute("PRAGMA user_version").fetchone()[0])
 
-    def _configure_connection(self, raw_path: str, *, initialize: bool) -> None:
+    def _configure_connection(self, *, initialize: bool) -> None:
         conn = self._get_conn()
         conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
         conn.execute("PRAGMA foreign_keys = ON")
@@ -434,7 +433,11 @@ class InfoStorage:
             raise TypeError("entry flags must be integers")
         if not isinstance(updated, str):
             raise TypeError("entry updated timestamp must be a string")
-        updated_at_us = cls._updated_at_us(updated)
+        parsed_updated = parse_updated(updated)
+        updated_at_us = (
+            int(parsed_updated.timestamp() * 1_000_000)
+            if parsed_updated is not None else 0
+        )
         if not srce_ty or not srce_id:
             raise ValueError("entry source type and ID are required")
         if len(srce_ty) > MAX_SOURCE_TYPE_LENGTH:
@@ -445,7 +448,7 @@ class InfoStorage:
             raise ValueError("entry version must be at least 1")
         if favored not in (0, 1) or noticed not in (0, 1):
             raise ValueError("entry flags must be 0 or 1")
-        if parse_updated(updated) is None:
+        if parsed_updated is None:
             raise ValueError("entry updated timestamp must be ISO 8601")
         tags = content.get("tags", [])
         if not isinstance(tags, list) or any(
@@ -684,7 +687,7 @@ class InfoStorage:
                             0 <= state_rev <= SQLITE_INT_MAX
                         ):
                             raise ValueError("invalid state revision")
-                    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                    except (KeyError, TypeError, ValueError) as exc:
                         raise RuntimeError(
                             f"cannot migrate entry {identity}: {exc}"
                         ) from exc

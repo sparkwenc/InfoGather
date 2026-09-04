@@ -129,6 +129,21 @@ input {
   border: 0;
 }
 
+.sr-only:focus {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: 10;
+  width: auto;
+  height: auto;
+  padding: 8px 12px;
+  clip: auto;
+  clip-path: none;
+  overflow: visible;
+  color: var(--ink);
+  background: var(--surface);
+}
+
 .skip-link {
   position: fixed;
   top: 10px;
@@ -209,9 +224,6 @@ input {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-}
-
-.panel-heading {
   padding: 0 6px 4px;
 }
 
@@ -534,7 +546,7 @@ input {
 }
 
 .search-field input::placeholder {
-  color: var(--faint);
+  color: var(--muted);
 }
 
 .search-field input:hover {
@@ -575,7 +587,7 @@ input {
   min-width: 46px;
   margin-right: 2px;
   padding: 0 9px;
-  color: var(--faint);
+  color: var(--muted);
   font-size: 10px;
   font-weight: 800;
   letter-spacing: 0.1em;
@@ -839,7 +851,7 @@ input {
 
 .del-btn {
   border-color: transparent;
-  color: var(--faint);
+  color: var(--muted);
   background: transparent;
 }
 

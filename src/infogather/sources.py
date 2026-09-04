@@ -249,7 +249,7 @@ class InfoSources:
         )
         self.cached_feeds = cached
         self.failed_feeds = failed
-        if failed == total and not cached:
+        if failed == total:
             raise RuntimeError("all configured feeds failed")
         return [feeds[index] for index in sorted(feeds)], state_updates
 
@@ -342,9 +342,6 @@ class InfoSources:
                     continue
                 raise RuntimeError(f"{name}: invalid feed: {detail}")
             return feed, state_update
-
-        raise RuntimeError("unreachable feed fetch state")
-
     @staticmethod
     def _crossref_feed(payload: object) -> dict:
         if not isinstance(payload, dict):
