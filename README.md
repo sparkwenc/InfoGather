@@ -9,3 +9,9 @@ uv run info
 ```
 
 Open <http://127.0.0.1:8787>.
+
+## Performance baseline
+
+```bash
+uv run python -m unittest test.perf_storage
+```
