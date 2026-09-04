@@ -23,7 +23,8 @@ from infogather.storage import InfoStorage
 ENTRY_COUNT = 25_000
 SAMPLES = 3
 DATABASE_BUDGET_FLOOR_SECONDS = {
-    "db_bulk_insert_25k": 1.500,
+    "db_bulk_insert_25k": 0.800,
+    "db_reingest_25k": 0.600,
     "db_flag_write": 0.005,
     "db_first_page": 0.005,
     "db_search": 0.080,
@@ -39,7 +40,8 @@ DATABASE_BUDGET_FLOOR_SECONDS = {
     "api_flag_write_keepalive": 0.003,
 }
 DATABASE_BUDGET_SCAN_MULTIPLIER = {
-    "db_bulk_insert_25k": 40,
+    "db_bulk_insert_25k": 20,
+    "db_reingest_25k": 18,
     "db_flag_write": 0.15,
     "db_first_page": 0.15,
     "db_search": 2.5,
@@ -173,6 +175,14 @@ class PerformanceBaselineTests(unittest.TestCase):
                 name: _median_seconds(operation)
                 for name, operation in operations.items()
             })
+
+            def reingest() -> None:
+                with InfoStorage.open_current(db_path) as storage, redirect_stdout(
+                    io.StringIO()
+                ):
+                    storage.insert_entries(entries)
+
+            measurements["db_reingest_25k"] = _median_seconds(reingest)
 
             favored = 0
             revision = 0

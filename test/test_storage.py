@@ -489,6 +489,33 @@ class InfoStorageTests(unittest.TestCase):
                     storage.insert_entries([valid, invalid])
                 self.assertEqual(_items(storage), [])
 
+    def test_bulk_insert_rolls_back_database_constraint_errors(self) -> None:
+        valid = _entry(version=1)
+        invalid = _entry(version=1, srce_id="\0")
+        with InfoStorage(":memory:") as storage:
+            with self.assertRaises(sqlite3.IntegrityError):
+                storage.insert_entries([valid, invalid])
+
+            self.assertEqual(_items(storage), [])
+
+    def test_same_batch_duplicate_preserves_upsert_semantics(self) -> None:
+        first = _entry(version=1, noticed=1, tags=["math.AG"])
+        first["favored"] = 1
+        second = _entry(version=2, tags=["math.NT"])
+        with InfoStorage(":memory:") as storage:
+            with redirect_stdout(io.StringIO()):
+                changed = storage.insert_entries([first, second])
+            stored = _items(storage)[0]
+
+        self.assertEqual(changed, 2)
+        self.assertEqual(
+            (
+                stored["version"], stored["favored"], stored["noticed"],
+                stored["state_rev"], stored["content"]["tags"],
+            ),
+            (2, 1, 0, 1, ["math.AG", "math.NT"]),
+        )
+
     def test_equal_version_merges_tags_across_batches(self) -> None:
         first = _entry(version=1)
         second = _entry(version=1)

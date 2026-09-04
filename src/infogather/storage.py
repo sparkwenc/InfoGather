@@ -106,8 +106,37 @@ class InfoStorage:
         conn = self._get_conn()
         with conn:
             conn.execute("BEGIN IMMEDIATE")
-            for entry in prepared:
-                changed_cnt += self._upsert_row(**entry)
+            if (
+                prepared
+                and conn.execute(
+                    "SELECT 1 FROM tab_entries LIMIT 1"
+                ).fetchone() is None
+                and len({
+                    (entry["srce_ty"], entry["srce_id"])
+                    for entry in prepared
+                }) == tot_cnt
+            ):
+                conn.executemany(
+                    """
+                    INSERT INTO tab_entries (
+                        srce_ty, srce_id, version,
+                        favored, noticed, state_rev,
+                        updated, updated_at_us, content
+                    ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)
+                    """,
+                    (
+                        (
+                            entry["srce_ty"], entry["srce_id"], entry["version"],
+                            entry["favored"], entry["noticed"], entry["updated"],
+                            entry["updated_at_us"], entry["content_json"],
+                        )
+                        for entry in prepared
+                    ),
+                )
+                changed_cnt = tot_cnt
+            else:
+                for entry in prepared:
+                    changed_cnt += self._upsert_row(**entry)
             self._update_feed_states(feed_states or {})
 
         print(
