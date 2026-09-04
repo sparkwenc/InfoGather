@@ -170,16 +170,22 @@ class ServeInsTests(unittest.TestCase):
             with _running_server(db_path) as server:
                 connection = HTTPConnection(*server.server_address)
                 try:
-                    connection.request("GET", "/api/health")
-                    first = connection.getresponse()
-                    self.assertEqual(first.version, 11)
-                    first.read()
-                    socket = connection.sock
+                    with mock.patch.object(
+                        InfoStorage,
+                        "open_current",
+                        wraps=InfoStorage.open_current,
+                    ) as open_current:
+                        connection.request("GET", "/api/entries")
+                        first = connection.getresponse()
+                        self.assertEqual(first.version, 11)
+                        first.read()
+                        socket = connection.sock
 
-                    connection.request("GET", "/api/health")
-                    second = connection.getresponse()
-                    second.read()
-                    self.assertIs(connection.sock, socket)
+                        connection.request("GET", "/api/entries")
+                        second = connection.getresponse()
+                        second.read()
+                        self.assertIs(connection.sock, socket)
+                        self.assertEqual(open_current.call_count, 1)
                 finally:
                     connection.close()
 

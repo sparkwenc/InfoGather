@@ -15,6 +15,7 @@ import secrets
 import socket
 import threading
 import tomllib
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from functools import partial
 from http import HTTPStatus
@@ -269,7 +270,25 @@ class InfoHandler(SimpleHTTPRequestHandler):
     ) -> None:
         self._db_path = db_path
         self._conf_path = conf_path
+        self._storage: InfoStorage | None = None
         super().__init__(*args, directory=str(WEB_DIR), **kwargs)
+
+    def finish(self) -> None:
+        try:
+            super().finish()
+        finally:
+            if self._storage is not None:
+                self._storage.close()
+
+    @contextmanager
+    def _current_storage(self):
+        if not hasattr(self, "_storage"):
+            with InfoStorage.open_current(str(self._db_path)) as storage:
+                yield storage
+            return
+        if self._storage is None:
+            self._storage = InfoStorage.open_current(str(self._db_path))
+        yield self._storage
 
     def end_headers(self) -> None:
         parsed = urlparse(self.path)
@@ -393,7 +412,7 @@ class InfoHandler(SimpleHTTPRequestHandler):
         include_total = _parse_flag(query.get("include_total", ["1"])[0])
 
         try:
-            with InfoStorage.open_current(str(self._db_path)) as storage:
+            with self._current_storage() as storage:
                 result = storage.query_entries(
                     **options,
                     limit=limit,
@@ -442,7 +461,7 @@ class InfoHandler(SimpleHTTPRequestHandler):
                 }
                 for group in configured_groups
             ]
-            with InfoStorage.open_current(str(self._db_path)) as storage:
+            with self._current_storage() as storage:
                 facets = storage.query_facets(
                     configured_tags=configured_tags,
                     groups=group_selectors,
@@ -559,7 +578,7 @@ class InfoHandler(SimpleHTTPRequestHandler):
             return
 
         try:
-            with InfoStorage.open_current(str(self._db_path)) as storage:
+            with self._current_storage() as storage:
                 changed = action(storage, srce_ty, srce_id)
         except Exception as exc:
             self._write_json(
@@ -696,7 +715,7 @@ class InfoHandler(SimpleHTTPRequestHandler):
 
         try:
             with REMOVE_UNDO_LOCK:
-                with InfoStorage.open_current(str(self._db_path)) as storage:
+                with self._current_storage() as storage:
                     entry = storage.pop_entry(
                         srce_ty,
                         srce_id,
@@ -752,7 +771,7 @@ class InfoHandler(SimpleHTTPRequestHandler):
                 if REMOVE_UNDO["token"] != token or not isinstance(entry, dict):
                     entry = None
                 else:
-                    with InfoStorage.open_current(str(self._db_path)) as storage:
+                    with self._current_storage() as storage:
                         restored = storage.restore_entry(entry)
                     REMOVE_UNDO["token"] = None
                     REMOVE_UNDO["entry"] = None

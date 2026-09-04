@@ -30,12 +30,13 @@ DATABASE_BUDGET_FLOOR_SECONDS = {
     "db_facets": 0.120,
     "db_search_facets": 0.120,
     "api_entries": 0.020,
-    "api_entries_keepalive": 0.005,
+    "api_entries_keepalive": 0.002,
     "api_facets": 0.150,
     "api_health_cold": 0.005,
     "api_health_keepalive": 0.001,
     "api_search_facets": 0.150,
     "api_flag_write": 0.010,
+    "api_flag_write_keepalive": 0.003,
 }
 DATABASE_BUDGET_SCAN_MULTIPLIER = {
     "db_bulk_insert_25k": 40,
@@ -45,12 +46,13 @@ DATABASE_BUDGET_SCAN_MULTIPLIER = {
     "db_facets": 3.5,
     "db_search_facets": 3.5,
     "api_entries": 0.5,
-    "api_entries_keepalive": 0.15,
+    "api_entries_keepalive": 0.06,
     "api_facets": 4,
     "api_health_cold": 0.1,
     "api_health_keepalive": 0.02,
     "api_search_facets": 4,
     "api_flag_write": 0.3,
+    "api_flag_write_keepalive": 0.08,
 }
 FRONTEND_BUDGETS = {
     "frontend_cards_1000_ms": 10.0,
@@ -271,8 +273,16 @@ class PerformanceBaselineTests(unittest.TestCase):
                 raise AssertionError(f"API baseline failed: {response.status} {result}")
             return result
 
-        def keepalive_request(path: str) -> dict:
-            keepalive.request("GET", path)
+        def keepalive_request(
+            method: str,
+            path: str,
+            payload: dict | None = None,
+        ) -> dict:
+            body = None if payload is None else json.dumps(payload)
+            headers = {}
+            if body is not None:
+                headers = {"Content-Type": "application/json", "Origin": origin}
+            keepalive.request(method, path, body=body, headers=headers)
             response = keepalive.getresponse()
             result = json.loads(response.read())
             if response.status != 200 or response.version != 11:
@@ -284,11 +294,11 @@ class PerformanceBaselineTests(unittest.TestCase):
         favored = initial_favored
         revision = initial_revision
 
-        def write_flags() -> None:
+        def write_flags(send=request) -> None:
             nonlocal favored, revision
             for _ in range(10):
                 next_favored = 1 - favored
-                request("POST", "/api/favored", {
+                send("POST", "/api/favored", {
                     "srce_ty": "arXiv",
                     "srce_id": "2601.00001",
                     "favored": next_favored,
@@ -305,7 +315,7 @@ class PerformanceBaselineTests(unittest.TestCase):
                 ),
                 "api_entries_keepalive": _median_seconds(
                     lambda: keepalive_request(
-                        "/api/entries?limit=24&include_total=1"
+                        "GET", "/api/entries?limit=24&include_total=1"
                     )
                 ),
                 "api_facets": _median_seconds(
@@ -315,12 +325,15 @@ class PerformanceBaselineTests(unittest.TestCase):
                     lambda: request("GET", "/api/health")
                 ),
                 "api_health_keepalive": _median_seconds(
-                    lambda: keepalive_request("/api/health")
+                    lambda: keepalive_request("GET", "/api/health")
                 ),
                 "api_search_facets": _median_seconds(
                     lambda: request("GET", "/api/tag-tree?q=needle")
                 ),
                 "api_flag_write": _median_seconds(write_flags) / 10,
+                "api_flag_write_keepalive": _median_seconds(
+                    lambda: write_flags(keepalive_request)
+                ) / 10,
             }
         finally:
             keepalive.close()
