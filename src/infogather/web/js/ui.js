@@ -205,7 +205,7 @@ let cardSequence = 0;
       return;
     }
 
-    state.treeGroups.forEach((group, groupIndex) => {
+    state.treeGroups.forEach((group) => {
       const groupLi = document.createElement("li");
       groupLi.className = "tree-item";
 
@@ -226,7 +226,7 @@ let cardSequence = 0;
       childUl.className = "tree-children";
 
       const children = Array.isArray(group.children) ? group.children : [];
-      children.forEach((node, childIndex) => {
+      children.forEach((node) => {
         const selectorValue = node.selector_value || node.name || "";
         const selector = `tag:${selectorValue}`;
 
@@ -239,9 +239,7 @@ let cardSequence = 0;
 
         const checkbox = document.createElement("input");
         checkbox.type = "checkbox";
-        checkbox.id = `source-${groupIndex}-${childIndex}`;
         checkbox.checked = state.selectedSelectors.has(selector);
-        label.htmlFor = checkbox.id;
         checkbox.addEventListener("change", () => {
           handlers.onSelectorChange(selector, checkbox.checked);
         });
