@@ -258,6 +258,8 @@ class ThreadingHTTPServerV6(ThreadingHTTPServer):
 
 
 class InfoHandler(SimpleHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
     def __init__(
         self,
         *args,

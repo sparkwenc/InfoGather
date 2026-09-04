@@ -30,7 +30,10 @@ DATABASE_BUDGET_FLOOR_SECONDS = {
     "db_facets": 0.120,
     "db_search_facets": 0.120,
     "api_entries": 0.020,
+    "api_entries_keepalive": 0.005,
     "api_facets": 0.150,
+    "api_health_cold": 0.005,
+    "api_health_keepalive": 0.001,
     "api_search_facets": 0.150,
     "api_flag_write": 0.010,
 }
@@ -42,7 +45,10 @@ DATABASE_BUDGET_SCAN_MULTIPLIER = {
     "db_facets": 3.5,
     "db_search_facets": 3.5,
     "api_entries": 0.5,
+    "api_entries_keepalive": 0.15,
     "api_facets": 4,
+    "api_health_cold": 0.1,
+    "api_health_keepalive": 0.02,
     "api_search_facets": 4,
     "api_flag_write": 0.3,
 }
@@ -247,6 +253,7 @@ class PerformanceBaselineTests(unittest.TestCase):
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         origin = f"http://127.0.0.1:{server.server_port}"
+        keepalive = HTTPConnection(*server.server_address, timeout=5)
 
         def request(method: str, path: str, payload: dict | None = None) -> dict:
             body = None if payload is None else json.dumps(payload)
@@ -262,6 +269,16 @@ class PerformanceBaselineTests(unittest.TestCase):
                 connection.close()
             if response.status != 200:
                 raise AssertionError(f"API baseline failed: {response.status} {result}")
+            return result
+
+        def keepalive_request(path: str) -> dict:
+            keepalive.request("GET", path)
+            response = keepalive.getresponse()
+            result = json.loads(response.read())
+            if response.status != 200 or response.version != 11:
+                raise AssertionError(
+                    f"keep-alive baseline failed: {response.status} {result}"
+                )
             return result
 
         favored = initial_favored
@@ -286,8 +303,19 @@ class PerformanceBaselineTests(unittest.TestCase):
                 "api_entries": _median_seconds(
                     lambda: request("GET", "/api/entries?limit=24&include_total=1")
                 ),
+                "api_entries_keepalive": _median_seconds(
+                    lambda: keepalive_request(
+                        "/api/entries?limit=24&include_total=1"
+                    )
+                ),
                 "api_facets": _median_seconds(
                     lambda: request("GET", "/api/tag-tree")
+                ),
+                "api_health_cold": _median_seconds(
+                    lambda: request("GET", "/api/health")
+                ),
+                "api_health_keepalive": _median_seconds(
+                    lambda: keepalive_request("/api/health")
                 ),
                 "api_search_facets": _median_seconds(
                     lambda: request("GET", "/api/tag-tree?q=needle")
@@ -295,6 +323,7 @@ class PerformanceBaselineTests(unittest.TestCase):
                 "api_flag_write": _median_seconds(write_flags) / 10,
             }
         finally:
+            keepalive.close()
             server.shutdown()
             server.server_close()
             thread.join()

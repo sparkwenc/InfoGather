@@ -163,6 +163,26 @@ class ServeInsTests(unittest.TestCase):
         for host in ("0.0.0.0", "::", "192.168.1.2", "example.com"):
             self.assertFalse(_is_loopback_host(host))
 
+    def test_server_keeps_http_1_1_connections_alive(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "entries.db"
+            _seed_entry(db_path)
+            with _running_server(db_path) as server:
+                connection = HTTPConnection(*server.server_address)
+                try:
+                    connection.request("GET", "/api/health")
+                    first = connection.getresponse()
+                    self.assertEqual(first.version, 11)
+                    first.read()
+                    socket = connection.sock
+
+                    connection.request("GET", "/api/health")
+                    second = connection.getresponse()
+                    second.read()
+                    self.assertIs(connection.sock, socket)
+                finally:
+                    connection.close()
+
     def test_ipv6_loopback_server_can_bind(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
