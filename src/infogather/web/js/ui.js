@@ -12,9 +12,9 @@ let cardSequence = 0;
     }
   }
 
-  function renderMath(node) {
+  function renderMath(node, text = node.textContent || "") {
     if (!window.renderMathInElement) return;
-    if (!/(\$|\\\(|\\\[)/.test(node.textContent || "")) return;
+    if (!/(\$|\\\(|\\\[)/.test(text)) return;
     window.renderMathInElement(node, {
       delimiters: [
         { left: "$$", right: "$$", display: true },
@@ -185,7 +185,9 @@ let cardSequence = 0;
       });
       card.appendChild(ul);
     }
-    renderMath(card);
+    renderMath(card, [
+      title, m1.textContent, m2.textContent, abst.textContent, ...visibleTags
+    ].join(" "));
     return card;
   }
 

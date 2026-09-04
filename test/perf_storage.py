@@ -55,7 +55,7 @@ DATABASE_BUDGET_SCAN_MULTIPLIER = {
     "api_flag_write_keepalive": 0.08,
 }
 FRONTEND_BUDGETS = {
-    "frontend_cards_1000_ms": 10.0,
+    "frontend_cards_1000_ms": 7.0,
     "frontend_trees_1000_ms": 15.0,
     "frontend_status_1000_ms": 2.0,
     "frontend_assets_bytes": 60_000,

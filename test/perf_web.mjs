@@ -21,8 +21,19 @@ class FakeElement {
     this.dataset = {};
     this.className = "";
     this.classList = new FakeClassList(this);
-    this.textContent = "";
+    this._textContent = "";
     this.hidden = false;
+  }
+
+  get textContent() {
+    return this._textContent + this.children.map(
+      (child) => typeof child === "string" ? child : child.textContent || ""
+    ).join("");
+  }
+
+  set textContent(value) {
+    this._textContent = String(value);
+    this.children = [];
   }
 
   append(...children) {
@@ -58,8 +69,12 @@ class FakeElement {
 globalThis.document = {
   createElement: (tagName) => new FakeElement(tagName)
 };
+let mathRenderCount = 0;
 globalThis.window = {
-  location: { href: "http://127.0.0.1:8787/" }
+  location: { href: "http://127.0.0.1:8787/" },
+  renderMathInElement() {
+    mathRenderCount += 1;
+  }
 };
 
 const uiPath = new URL("../src/infogather/web/js/ui.js", import.meta.url);
@@ -131,6 +146,12 @@ const insElements = {
   insProgress: new FakeElement("progress"),
   insText: new FakeElement("span")
 };
+
+ui.makeCard({
+  ...entry,
+  content: { ...entry.content, titl: "Formula $x$" }
+});
+if (mathRenderCount !== 1) throw new Error("formula card skipped math rendering");
 
 const measurements = {
   frontend_cards_1000_ms: benchmark(1000, () => ui.makeCard(entry)),
