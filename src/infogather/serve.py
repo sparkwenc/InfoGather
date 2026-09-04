@@ -14,6 +14,7 @@ import ipaddress
 import json
 import secrets
 import socket
+import sys
 import threading
 import tomllib
 from contextlib import contextmanager
@@ -251,7 +252,14 @@ def _http_authority(value: str) -> tuple[str, int] | None:
     return hostname.casefold(), port or 80
 
 
-class ThreadingHTTPServerV6(ThreadingHTTPServer):
+class InfoHTTPServer(ThreadingHTTPServer):
+    def handle_error(self, request, client_address) -> None:
+        if isinstance(sys.exception(), ConnectionResetError):
+            return
+        super().handle_error(request, client_address)
+
+
+class ThreadingHTTPServerV6(InfoHTTPServer):
     address_family = socket.AF_INET6
 
 
@@ -892,8 +900,8 @@ def main() -> int:
     server_class = (
         ThreadingHTTPServerV6
         if ipaddress.ip_address(bind_host).version == 6
-        else ThreadingHTTPServer
-    ) if bind_host != "localhost" else ThreadingHTTPServer
+        else InfoHTTPServer
+    ) if bind_host != "localhost" else InfoHTTPServer
     display_host = f"[{bind_host}]" if server_class is ThreadingHTTPServerV6 else bind_host
     with server_class((bind_host, args.port), handler) as server:
         print(

@@ -15,6 +15,7 @@ from http import HTTPStatus
 
 from infogather.serve import (
     InfoHandler,
+    InfoHTTPServer,
     InfoStorage,
     ThreadingHTTPServerV6,
     _decode_cursor,
@@ -58,7 +59,7 @@ def _running_server(db_path: Path):
         db_path=db_path,
         conf_path=db_path.parent / "config.toml",
     )
-    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    server = InfoHTTPServer(("127.0.0.1", 0), handler)
     server.daemon_threads = True
     thread = threading.Thread(target=server.serve_forever)
     with mock.patch.object(InfoHandler, "log_message"):
@@ -204,6 +205,17 @@ class ServeInsTests(unittest.TestCase):
                         self.assertEqual(open_current.call_count, 1)
                 finally:
                     connection.close()
+
+    def test_server_ignores_only_client_connection_resets(self) -> None:
+        server = object.__new__(InfoHTTPServer)
+        with mock.patch.object(ThreadingHTTPServer, "handle_error") as report_error:
+            for error in (ConnectionResetError(), RuntimeError()):
+                try:
+                    raise error
+                except Exception:
+                    server.handle_error(None, ("127.0.0.1", 1))
+
+        report_error.assert_called_once()
 
     def test_ipv6_loopback_server_can_bind(self) -> None:
         with tempfile.TemporaryDirectory() as td:
