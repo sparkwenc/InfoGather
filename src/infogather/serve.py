@@ -12,6 +12,7 @@ import argparse
 import base64
 import ipaddress
 import json
+import re
 import secrets
 import socket
 import sys
@@ -61,7 +62,7 @@ def _parse_flag(raw: str) -> bool:
 def _parse_selectors(values: list[str]) -> set[str]:
     tag_values: set[str] = set()
     for value in values:
-        for part in value.split(","):
+        for part in re.split(r",\s*(?=tag:)", value):
             selector = part.strip()
             if not selector:
                 continue
@@ -109,7 +110,7 @@ def _decode_cursor(raw: str) -> tuple[int, str, str] | None:
     try:
         padded = raw + "=" * (-len(raw) % 4)
         value = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:
         raise ValueError("invalid cursor") from exc
     return _validate_cursor(value)
 
@@ -349,7 +350,12 @@ class InfoHandler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/":
             self.path = "/index.html"
-        super().do_GET()
+        if self.command == "HEAD":
+            super().do_HEAD()
+        else:
+            super().do_GET()
+
+    do_HEAD = do_GET
 
     def do_POST(self) -> None:
         self._close_after_body = self.close_connection
@@ -551,7 +557,7 @@ class InfoHandler(SimpleHTTPRequestHandler):
         self.close_connection = getattr(self, "_close_after_body", True)
         try:
             payload = json.loads(body.decode("utf-8"))
-        except ValueError:
+        except (ValueError, RecursionError):
             return None
         return payload if isinstance(payload, dict) else None
 
@@ -872,7 +878,8 @@ class InfoHandler(SimpleHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        if self.command != "HEAD":
+            self.wfile.write(data)
 
 
 def main() -> int:

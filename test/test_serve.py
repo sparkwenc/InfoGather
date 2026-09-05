@@ -1,4 +1,5 @@
 import io
+import base64
 import json
 import socket
 import tempfile
@@ -10,6 +11,7 @@ from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
+from urllib.parse import urlencode
 
 from http import HTTPStatus
 
@@ -98,6 +100,61 @@ class HandlerHarness(InfoHandler):
 
 
 class ServeInsTests(unittest.TestCase):
+    def test_head_uses_get_routing_and_host_checks_without_response_body(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "entries.db"
+            _seed_entry(db_path)
+            with _running_server(db_path) as server:
+                connection = HTTPConnection(*server.server_address, timeout=5)
+                try:
+                    for path in ("/", "/api/health", "/api/entries"):
+                        with self.subTest(path=path):
+                            connection.request("HEAD", path)
+                            response = connection.getresponse()
+                            self.assertEqual(response.status, HTTPStatus.OK)
+                            self.assertGreater(int(response.getheader("Content-Length")), 0)
+                            self.assertEqual(response.read(), b"")
+                    connection.request("HEAD", "/", headers={"Host": "rebind.example"})
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, HTTPStatus.MISDIRECTED_REQUEST)
+                    self.assertEqual(response.read(), b"")
+                    connection.request("GET", "/api/health")
+                    self.assertEqual(json.loads(connection.getresponse().read()), {"ok": True})
+                finally:
+                    connection.close()
+
+    def test_deeply_nested_json_is_rejected_and_connection_remains_usable(self) -> None:
+        nested = "[" * 2000 + "0" + "]" * 2000
+        cursor = base64.urlsafe_b64encode(nested.encode()).decode()
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "entries.db"
+            _seed_entry(db_path)
+            with _running_server(db_path) as server:
+                connection = HTTPConnection(*server.server_address, timeout=5)
+                try:
+                    connection.request("POST", "/api/favored", body='{"nested":' + nested + '}', headers={
+                        "Content-Type": "application/json",
+                        "Origin": f"http://127.0.0.1:{server.server_port}",
+                    })
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, HTTPStatus.BAD_REQUEST)
+                    response.read()
+                    connection.request("GET", "/api/entries?" + urlencode({"cursor": cursor}))
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, HTTPStatus.BAD_REQUEST)
+                    response.read()
+                    connection.request("GET", "/api/entries")
+                    entries = json.loads(connection.getresponse().read())["items"]
+                    self.assertEqual(entries[0]["favored"], 0)
+                finally:
+                    connection.close()
+
+    def test_source_selectors_preserve_commas_in_names(self) -> None:
+        self.assertEqual(serve._parse_selectors([
+            "tag:source:Journals:Geometry, Topology",
+            "tag:math.AG, tag:math.NT",
+        ]), {"source:Journals:Geometry, Topology", "math.AG", "math.NT"})
+
     def setUp(self) -> None:
         with serve.INS_LOCK:
             serve.INS_JOB["state"] = "running"
