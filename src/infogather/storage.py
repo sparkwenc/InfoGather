@@ -1,23 +1,28 @@
 import json
 import math
 import sqlite3
+from itertools import batched
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .filters import parse_updated
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 BUSY_TIMEOUT_MS = 10_000
 MMAP_SIZE_BYTES = 256 * 1024 * 1024
 SQLITE_INT_MAX = 2 ** 63 - 1
 MAX_SOURCE_TYPE_LENGTH = 512
 MAX_SOURCE_ID_LENGTH = 4096
 MAX_FETCH_AT = 253_402_300_799
+BULK_INDEX_THRESHOLD = 1000
 SEARCH_ASCII_SQL = (
     "length(CAST(srce_id AS BLOB)) = length(srce_id) AND "
     "length(CAST(content AS BLOB)) = length(content) AND "
-    "instr(content, '\\u') = 0"
+    "content NOT GLOB '*\\u*'"
+)
+CONTENT_ENCODER = json.JSONEncoder(
+    ensure_ascii=False, allow_nan=False, separators=(",", ":")
 )
 
 
@@ -120,23 +125,7 @@ class InfoStorage:
                     for entry in prepared
                 }) == tot_cnt
             ):
-                conn.executemany(
-                    """
-                    INSERT INTO tab_entries (
-                        srce_ty, srce_id, version,
-                        favored, noticed, state_rev,
-                        updated, updated_at_us, content
-                    ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)
-                    """,
-                    (
-                        (
-                            entry["srce_ty"], entry["srce_id"], entry["version"],
-                            entry["favored"], entry["noticed"], entry["updated"],
-                            entry["updated_at_us"], entry["content_json"],
-                        )
-                        for entry in prepared
-                    ),
-                )
+                self._insert_initial_rows(prepared)
                 changed_cnt = tot_cnt
             else:
                 for entry in prepared:
@@ -396,6 +385,34 @@ class InfoStorage:
         }
 
     # internal methods
+    def _insert_initial_rows(self, entries: list[dict]) -> None:
+        conn = self._get_conn()
+        sql = """INSERT INTO tab_entries (
+            srce_ty, srce_id, version, favored, noticed, state_rev,
+            updated, updated_at_us, content
+        ) VALUES """
+        placeholders = "(?, ?, ?, ?, ?, 0, ?, ?, ?)"
+        rows = (
+            (
+                entry["srce_ty"], entry["srce_id"], entry["version"],
+                entry["favored"], entry["noticed"], entry["updated"],
+                entry["updated_at_us"], entry["content_json"],
+            )
+            for entry in entries
+        )
+        if len(entries) < BULK_INDEX_THRESHOLD:
+            conn.executemany(sql + placeholders, rows)
+            return
+        conn.execute("DROP INDEX idx_entries_page")
+        conn.execute("DROP INDEX idx_entries_favored_page")
+        batch_size = min(250, conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) // 8)
+        for batch in batched(rows, batch_size):
+            conn.execute(
+                sql + ",".join([placeholders] * len(batch)),
+                [value for row in batch for value in row],
+            )
+        self._create_entry_indexes()
+
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is None:
             raise RuntimeError("InfoStorage is closed.")
@@ -669,8 +686,8 @@ class InfoStorage:
                 raise RuntimeError(
                     f"cannot migrate tab_entries; missing columns: {sorted(missing)}"
                 )
-            conn.execute("DROP TABLE IF EXISTS tab_entries_v7")
-            self._create_entries_table("tab_entries_v7")
+            conn.execute("DROP TABLE IF EXISTS tab_entries_migrating")
+            self._create_entries_table("tab_entries_migrating")
             noticed_sql = "noticed" if "noticed" in columns else "0 AS noticed"
             state_rev_sql = (
                 "state_rev" if "state_rev" in columns else "0 AS state_rev"
@@ -714,7 +731,7 @@ class InfoStorage:
                     ))
                 conn.executemany(
                     """
-                    INSERT INTO tab_entries_v7 (
+                    INSERT INTO tab_entries_migrating (
                         srce_ty, srce_id, version, favored, noticed, state_rev,
                         updated, updated_at_us, content
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -722,7 +739,7 @@ class InfoStorage:
                     values,
                 )
             conn.execute("DROP TABLE tab_entries")
-            conn.execute("ALTER TABLE tab_entries_v7 RENAME TO tab_entries")
+            conn.execute("ALTER TABLE tab_entries_migrating RENAME TO tab_entries")
         else:
             self._create_entries_table("tab_entries")
 
@@ -730,6 +747,10 @@ class InfoStorage:
         conn.execute("DROP TABLE IF EXISTS tab_entries_fts")
         conn.execute("DROP TRIGGER IF EXISTS trg_entries_assign_pk")
         self._install_feed_state_table(tables)
+        self._create_entry_indexes()
+
+    def _create_entry_indexes(self) -> None:
+        conn = self._get_conn()
         conn.execute(
             """CREATE INDEX idx_entries_page
             ON tab_entries(updated_at_us DESC, srce_ty, srce_id)"""
@@ -790,9 +811,9 @@ class InfoStorage:
         ]
         if "url" not in columns or primary_key != ["url"]:
             raise RuntimeError("tab_feed_state URL must be its primary key")
-        conn.execute("DROP TABLE IF EXISTS tab_feed_state_v7")
+        conn.execute("DROP TABLE IF EXISTS tab_feed_state_migrating")
         conn.execute(f"""
-            CREATE TABLE tab_feed_state_v7 (
+            CREATE TABLE tab_feed_state_migrating (
                 url TEXT PRIMARY KEY NOT NULL CHECK (length(trim(url)) > 0),
                 etag TEXT,
                 last_modified TEXT,
@@ -813,7 +834,7 @@ class InfoStorage:
         )
         next_fetch = "next_fetch_at" if "next_fetch_at" in columns else "0"
         conn.execute(f"""
-            INSERT INTO tab_feed_state_v7 (
+            INSERT INTO tab_feed_state_migrating (
                 url, etag, last_modified, next_fetch_at
             )
             SELECT url, {etag}, {modified},
@@ -826,7 +847,7 @@ class InfoStorage:
             FROM tab_feed_state
         """)
         conn.execute("DROP TABLE tab_feed_state")
-        conn.execute("ALTER TABLE tab_feed_state_v7 RENAME TO tab_feed_state")
+        conn.execute("ALTER TABLE tab_feed_state_migrating RENAME TO tab_feed_state")
 
     def _upsert_row(
         self,
@@ -867,6 +888,12 @@ class InfoStorage:
             return 1
 
         stored_version = int(existing["version"])
+        if (
+            version == stored_version
+            and updated == existing["updated"]
+            and content_json == existing["content"]
+        ):
+            return 0
         existing_content = json.loads(existing["content"])
         existing_tags = existing_content.get("tags", []) or []
         incoming_tags = content.get("tags", []) or []
@@ -932,12 +959,7 @@ class InfoStorage:
 
     @staticmethod
     def _encode_content(content: dict) -> str:
-        return json.dumps(
-            content,
-            ensure_ascii=False,
-            allow_nan=False,
-            separators=(",", ":"),
-        )
+        return CONTENT_ENCODER.encode(content)
 
     @staticmethod
     def _where_sql(conditions: list[str]) -> str:

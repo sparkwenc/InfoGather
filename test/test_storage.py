@@ -5,8 +5,9 @@ import tempfile
 import unittest
 from contextlib import closing, contextmanager, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
-from infogather.storage import InfoStorage, SCHEMA_VERSION
+from infogather.storage import BULK_INDEX_THRESHOLD, InfoStorage, SCHEMA_VERSION
 
 
 def _entry(
@@ -47,6 +48,27 @@ def _connect(path: Path):
 
 
 class InfoStorageTests(unittest.TestCase):
+    def test_v7_migration_preserves_entries_with_previous_generated_expression(self) -> None:
+        legacy_expression = (
+            "length(CAST(srce_id AS BLOB)) = length(srce_id) AND "
+            "length(CAST(content AS BLOB)) = length(content) AND "
+            "instr(content, '\\u') = 0"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "entries.db"
+            with (
+                patch("infogather.storage.SCHEMA_VERSION", 7),
+                patch("infogather.storage.SEARCH_ASCII_SQL", legacy_expression),
+                InfoStorage(path) as storage,
+                redirect_stdout(io.StringIO()),
+            ):
+                storage.insert_entries([_entry(version=1, title="Straße")])
+                before = _items(storage)
+            with InfoStorage(path) as storage:
+                self.assertEqual(_items(storage), before)
+                self.assertEqual(storage.query_entries(query_text="STRASSE")["total"], 1)
+                self.assertEqual(storage._schema_version(), SCHEMA_VERSION)
+
     def test_v6_migration_preserves_state_and_builds_search_classification(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "entries.db"
@@ -507,6 +529,33 @@ class InfoStorageTests(unittest.TestCase):
                 storage.insert_entries([valid, invalid])
 
             self.assertEqual(_items(storage), [])
+
+    def test_large_initial_insert_restores_indexes_after_success_or_rollback(self) -> None:
+        entries = [_entry(version=1, srce_id=str(index)) for index in range(BULK_INDEX_THRESHOLD)]
+        with InfoStorage(":memory:") as storage, redirect_stdout(io.StringIO()):
+            storage._get_conn().setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+            with self.assertRaises(sqlite3.IntegrityError):
+                storage.insert_entries([*entries, _entry(version=1, srce_id="\0")])
+            self.assertEqual(storage.query_entries()["total"], 0)
+            storage._validate_current_schema()
+            self.assertEqual(storage.insert_entries(entries), len(entries))
+            storage._validate_current_schema()
+            page = storage.query_entries(limit=1)
+            self.assertEqual(page["total"], len(entries))
+            self.assertTrue(page["has_more"])
+
+    def test_unchanged_reingestion_preserves_user_state_and_updates_feed_cache(self) -> None:
+        entry = _entry(version=1)
+        with InfoStorage(":memory:") as storage, redirect_stdout(io.StringIO()):
+            storage.insert_entries([entry])
+            storage.favor_entry_if_current("arXiv", "2601.00001", 0, 0, 1)
+            storage.notice_entry_if_current("arXiv", "2601.00001", 0, 1, 1)
+            before = _items(storage)
+            self.assertEqual(storage.insert_entries([entry], {
+                "https://example.com/feed": {"etag": "new"},
+            }), 0)
+            self.assertEqual(_items(storage), before)
+            self.assertEqual(storage.get_feed_states()["https://example.com/feed"]["etag"], "new")
 
     def test_same_batch_duplicate_preserves_upsert_semantics(self) -> None:
         first = _entry(version=1, noticed=1, tags=["math.AG"])
