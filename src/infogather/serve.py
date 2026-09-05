@@ -5,7 +5,7 @@ from .storage import (
     SQLITE_INT_MAX,
 )
 from .paths import DEFAULT_CONFIG_PATH, DEFAULT_DB_PATH, WEB_DIR
-from .ingestion import run_ingestion
+from .ingestion import load_config, run_ingestion
 from .sources import configured_sources
 
 import argparse
@@ -17,14 +17,12 @@ import secrets
 import socket
 import sys
 import threading
-import tomllib
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from functools import partial
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
 INS_LOCK = threading.Lock()
@@ -195,10 +193,7 @@ def _run_ins_job(db_path: str | Path, conf_path: Path) -> None:
 def _load_configured_sources(conf_path: Path) -> list[dict]:
     if not conf_path.exists():
         return []
-    with conf_path.open("rb") as f:
-        conf = tomllib.load(f)
-
-    sources = configured_sources(conf)
+    sources = configured_sources(load_config(conf_path))
     groups = []
     by_name = {}
     for source in sources:
@@ -594,15 +589,38 @@ class InfoHandler(SimpleHTTPRequestHandler):
             return None
         return revision if 0 <= revision <= SQLITE_INT_MAX else None
 
-    def _handle_entry_mutation(
-        self,
-        payload: dict,
-        *,
-        action_error: str,
-        action: Callable[[InfoStorage, str, str], int],
-        success_extra: dict[str, object],
-        no_change_error: str,
-    ) -> None:
+    def _handle_favored(self) -> None:
+        self._handle_flag("favored")
+
+    def _handle_noticed(self) -> None:
+        self._handle_flag("noticed")
+
+    def _handle_flag(self, field: str) -> None:
+        update = {
+            "favored": InfoStorage.favor_entry_if_current,
+            "noticed": InfoStorage.notice_entry_if_current,
+        }[field]
+        payload = self._read_json_body()
+        if payload is None:
+            self._write_json(
+                {"error": "invalid JSON body"},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+
+        value = self._binary_value_from_payload(payload, field)
+        expected = self._binary_value_from_payload(payload, f"expected_{field}")
+        revision = self._revision_from_payload(payload)
+        if value is None or expected is None or revision is None or value == expected:
+            self._write_json(
+                {"error": (
+                    f"srce_ty, srce_id, {field}(0/1) and "
+                    f"expected_{field}(0/1), expected_revision are required; "
+                    f"{field} values must differ"
+                )},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
         srce_ty, srce_id = self._source_key_from_payload(payload)
         if not srce_ty or not srce_id:
             self._write_json(
@@ -610,118 +628,29 @@ class InfoHandler(SimpleHTTPRequestHandler):
                 status=HTTPStatus.BAD_REQUEST,
             )
             return
-
         try:
             with self._current_storage() as storage:
-                changed = action(storage, srce_ty, srce_id)
+                changed = update(storage, srce_ty, srce_id, expected, revision, value)
         except Exception as exc:
             self._write_json(
-                {"error": f"failed to {action_error}: {exc}"},
+                {"error": f"failed to update {field}: {exc}"},
                 status=HTTPStatus.INTERNAL_SERVER_ERROR,
             )
             return
-
         if not changed:
             self._write_json(
-                {"error": no_change_error},
+                {"error": f"entry {field} state changed"},
                 status=HTTPStatus.CONFLICT,
             )
             return
-
-        response = {
+        self._write_json({
             "ok": True,
             "updated": int(changed),
             "srce_ty": srce_ty,
             "srce_id": srce_id,
-        }
-        response.update(success_extra)
-        self._write_json(response)
-
-    def _handle_favored(self) -> None:
-        payload = self._read_json_body()
-        if payload is None:
-            self._write_json(
-                {"error": "invalid JSON body"},
-                status=HTTPStatus.BAD_REQUEST,
-            )
-            return
-
-        favored = self._binary_value_from_payload(payload, "favored")
-        expected = self._binary_value_from_payload(payload, "expected_favored")
-        expected_revision = self._revision_from_payload(payload)
-        if (
-            favored is None
-            or expected is None
-            or expected_revision is None
-            or favored == expected
-        ):
-            self._write_json(
-                {
-                    "error": (
-                        "srce_ty, srce_id, favored(0/1) and "
-                        "expected_favored(0/1), expected_revision are required; "
-                        "favored values must differ"
-                    )
-                },
-                status=HTTPStatus.BAD_REQUEST,
-            )
-            return
-
-        self._handle_entry_mutation(
-            payload,
-            action_error="update favored",
-            action=lambda storage, srce_ty, srce_id: storage.favor_entry_if_current(
-                srce_ty, srce_id, expected, expected_revision, favored
-            ),
-            success_extra={
-                "favored": favored,
-                "state_rev": expected_revision + 1,
-            },
-            no_change_error="entry favored state changed",
-        )
-
-    def _handle_noticed(self) -> None:
-        payload = self._read_json_body()
-        if payload is None:
-            self._write_json(
-                {"error": "invalid JSON body"},
-                status=HTTPStatus.BAD_REQUEST,
-            )
-            return
-
-        noticed = self._binary_value_from_payload(payload, "noticed")
-        expected = self._binary_value_from_payload(payload, "expected_noticed")
-        expected_revision = self._revision_from_payload(payload)
-        if (
-            noticed is None
-            or expected is None
-            or expected_revision is None
-            or noticed == expected
-        ):
-            self._write_json(
-                {
-                    "error": (
-                        "srce_ty, srce_id, noticed(0/1) and "
-                        "expected_noticed(0/1), expected_revision are required; "
-                        "noticed values must differ"
-                    )
-                },
-                status=HTTPStatus.BAD_REQUEST,
-            )
-            return
-
-        self._handle_entry_mutation(
-            payload,
-            action_error="update noticed",
-            action=lambda storage, srce_ty, srce_id: storage.notice_entry_if_current(
-                srce_ty, srce_id, expected, expected_revision, noticed
-            ),
-            success_extra={
-                "noticed": noticed,
-                "state_rev": expected_revision + 1,
-            },
-            no_change_error="entry noticed state changed",
-        )
+            field: value,
+            "state_rev": revision + 1,
+        })
 
     def _handle_remove_entry(self) -> None:
         payload = self._read_json_body()

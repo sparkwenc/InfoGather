@@ -12,12 +12,14 @@ function deferred() {
 }
 
 function element() {
+  const listeners = new Map();
   return {
     children: [],
     dataset: {},
     textContent: "",
     classList: { toggle() {} },
-    addEventListener() {},
+    addEventListener(event, handler) { listeners.set(event, handler); },
+    click() { listeners.get("click")?.(); },
     setAttribute() {},
     removeAttribute() {},
     contains() { return false; },
@@ -54,7 +56,10 @@ async function application(overrides = {}) {
     api, document, AbortController, AbortSignal, URLSearchParams,
     console: { error() {} },
     window: { alert() {} },
-    ui: { setMeta() {}, renderTree() {}, renderInsJob() {}, makeCard: element },
+    ui: {
+      setMeta() {}, renderTree() {}, renderInsJob() {}, makeCard: element,
+      setToggle(button, active) { button.pressed = active; }
+    },
     setTimeout() { throw new Error("Unexpected polling timer"); },
     clearTimeout() {}
   });
@@ -131,4 +136,29 @@ test("a flag change cancels pagination and the next load can proceed", async () 
   assert.equal(app.state.offset, 0);
   assert.equal(await app.fetchEntries(), true);
   assert.equal(signals[2].aborted, false);
+});
+
+test("filter buttons preserve independent states and enforce exclusive pairs", async () => {
+  const app = await application();
+  const click = async (id) => {
+    app.elements.get(id).click();
+    await new Promise(setImmediate);
+  };
+  await click("favored-btn");
+  await click("unnoticed-btn");
+  for (const [first, firstField, second, secondField] of [
+    ["day-btn", "updatedWithinDay", "week-btn", "updatedWithinWeek"],
+    ["version-btn", "versionIs1", "version-not-btn", "versionIsNot1"]
+  ]) {
+    await click(first);
+    assert.equal(app.state[firstField], true);
+    await click(second);
+    assert.equal(app.state[firstField], false);
+    assert.equal(app.elements.get(first).pressed, false);
+    assert.equal(app.state[secondField], true);
+    await click(second);
+    assert.equal(app.state[secondField], false);
+  }
+  assert.equal(app.state.favoredOnly, true);
+  assert.equal(app.state.unnoticedOnly, true);
 });

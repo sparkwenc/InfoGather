@@ -589,61 +589,25 @@ listEl.addEventListener("click", (event) => {
   }
 });
 
-favoredBtn.addEventListener("click", () => {
-  state.favoredOnly = !state.favoredOnly;
-  ui.setToggle(favoredBtn, state.favoredOnly);
-  void refreshFilteredView();
-});
-
-unnoticedBtn.addEventListener("click", () => {
-  state.unnoticedOnly = !state.unnoticedOnly;
-  ui.setToggle(unnoticedBtn, state.unnoticedOnly);
-  void refreshFilteredView();
-});
-
-dayBtn.addEventListener("click", () => {
-  const next = !state.updatedWithinDay;
-  state.updatedWithinDay = next;
-  if (next) {
-    state.updatedWithinWeek = false;
-    ui.setToggle(weekBtn, false);
-  }
-  ui.setToggle(dayBtn, state.updatedWithinDay);
-  void refreshFilteredView();
-});
-
-weekBtn.addEventListener("click", () => {
-  const next = !state.updatedWithinWeek;
-  state.updatedWithinWeek = next;
-  if (next) {
-    state.updatedWithinDay = false;
-    ui.setToggle(dayBtn, false);
-  }
-  ui.setToggle(weekBtn, state.updatedWithinWeek);
-  void refreshFilteredView();
-});
-
-versionBtn.addEventListener("click", () => {
-  const next = !state.versionIs1;
-  state.versionIs1 = next;
-  if (next) {
-    state.versionIsNot1 = false;
-    ui.setToggle(versionNotBtn, false);
-  }
-  ui.setToggle(versionBtn, state.versionIs1);
-  void refreshFilteredView();
-});
-
-versionNotBtn.addEventListener("click", () => {
-  const next = !state.versionIsNot1;
-  state.versionIsNot1 = next;
-  if (next) {
-    state.versionIs1 = false;
-    ui.setToggle(versionBtn, false);
-  }
-  ui.setToggle(versionNotBtn, state.versionIsNot1);
-  void refreshFilteredView();
-});
+for (const [button, field, exclusive] of [
+  [favoredBtn, "favoredOnly"],
+  [unnoticedBtn, "unnoticedOnly"],
+  [dayBtn, "updatedWithinDay", [weekBtn, "updatedWithinWeek"]],
+  [weekBtn, "updatedWithinWeek", [dayBtn, "updatedWithinDay"]],
+  [versionBtn, "versionIs1", [versionNotBtn, "versionIsNot1"]],
+  [versionNotBtn, "versionIsNot1", [versionBtn, "versionIs1"]]
+]) {
+  button.addEventListener("click", () => {
+    state[field] = !state[field];
+    if (state[field] && exclusive) {
+      const [otherButton, otherField] = exclusive;
+      state[otherField] = false;
+      ui.setToggle(otherButton, false);
+    }
+    ui.setToggle(button, state[field]);
+    void refreshFilteredView();
+  });
+}
 
 clearTagsEl.addEventListener("click", () => {
   if (!state.selectedSelectors.size) return;

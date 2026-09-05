@@ -218,16 +218,23 @@ class InfoStorage:
         state_rev = entry["state_rev"]
         if type(state_rev) is not int or not 0 <= state_rev <= SQLITE_INT_MAX:
             raise ValueError("state revision is outside SQLite integer range")
-        return self._restore_row(
-            prepared["srce_ty"],
-            prepared["srce_id"],
-            prepared["version"],
-            prepared["favored"],
-            prepared["noticed"],
-            state_rev,
-            prepared["updated"],
-            prepared["content"],
-        )
+        prepared["state_rev"] = state_rev
+        conn = self._get_conn()
+        with conn:
+            cur = conn.execute(
+                """
+                INSERT INTO tab_entries (
+                    srce_ty, srce_id, version, favored, noticed, state_rev,
+                    updated, updated_at_us, content
+                ) VALUES (
+                    :srce_ty, :srce_id, :version, :favored, :noticed, :state_rev,
+                    :updated, :updated_at_us, :content_json
+                )
+                ON CONFLICT(srce_ty, srce_id) DO NOTHING
+                """,
+                prepared,
+            )
+            return cur.rowcount
 
     def query_entries(
         self,
@@ -406,13 +413,6 @@ class InfoStorage:
             conn.execute("PRAGMA journal_mode = WAL")
         if not self._memory:
             conn.execute("PRAGMA synchronous = NORMAL")
-
-    @staticmethod
-    def _updated_at_us(value: str) -> int:
-        updated = parse_updated(value)
-        if updated is None:
-            return 0
-        return int(updated.timestamp() * 1_000_000)
 
     @classmethod
     def _prepare_entry(cls, entry: dict) -> dict:
@@ -1050,38 +1050,6 @@ class InfoStorage:
                 ),
             )
         return cur.rowcount
-
-    def _restore_row(
-        self,
-        srce_ty: str,
-        srce_id: str,
-        version: int,
-        favored: int,
-        noticed: int,
-        state_rev: int,
-        updated: str,
-        content: dict,
-    ) -> int:
-        conn = self._get_conn()
-        with conn:
-            conn.execute("BEGIN IMMEDIATE")
-            cur = conn.execute(
-                """
-                INSERT INTO tab_entries (
-                    srce_ty, srce_id, version,
-                    favored, noticed, state_rev,
-                    updated, updated_at_us, content
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(srce_ty, srce_id) DO NOTHING
-                """,
-                (
-                    srce_ty, srce_id, version, favored, noticed,
-                    state_rev, updated, self._updated_at_us(updated),
-                    self._encode_content(content),
-                ),
-            )
-            return cur.rowcount
 
     # helper methods
     @staticmethod
