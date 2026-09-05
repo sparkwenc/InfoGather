@@ -25,6 +25,69 @@ class Response(io.BytesIO):
 
 
 class InfoSourcesTests(unittest.TestCase):
+    def test_http_error_response_is_closed(self) -> None:
+        body = io.BytesIO(b"unavailable")
+        failure = HTTPError("url", 503, "unavailable", {}, body)
+        with patch("infogather.sources.urlopen", side_effect=failure):
+            status, _, _ = InfoSources._read_feed_response(
+                "https://example.com/feed", headers={}, name="Example"
+            )
+        self.assertEqual(status, 503)
+        self.assertTrue(body.closed)
+
+    def test_304_respects_explicit_expired_freshness(self) -> None:
+        for headers in (
+            {"cache-control": "max-age=0"},
+            {"cache-control": "max-age=60", "age": "60"},
+            {"cache-control": "s-maxage=0"},
+        ):
+            with self.subTest(headers=headers), patch("infogather.sources.time.time", return_value=1000):
+                state = InfoSources._feed_state_from_headers(
+                    headers, previous={}, status_code=304
+                )
+            self.assertEqual(state["next_fetch_at"], 1000)
+
+    def test_mixed_case_headers_apply_to_cache_and_retry(self) -> None:
+        with (
+            patch("infogather.sources.urlopen", side_effect=[
+                HTTPError("url", 429, "busy", {"Retry-After": "2"}, None),
+                Response(headers={"Cache-Control": "max-age=60", "ETag": "new"}),
+            ]),
+            patch("infogather.sources.feedparser.parse", return_value={"entries": []}),
+            patch("infogather.sources.time.time", return_value=1000),
+            patch("infogather.sources.time.sleep") as sleep,
+            patch("builtins.print"),
+        ):
+            _, state = InfoSources._fetch_feed("https://example.com/feed", "Example")
+        sleep.assert_called_once_with(2)
+        self.assertEqual(state["etag"], "new")
+        self.assertEqual(state["next_fetch_at"], 1060)
+
+    def test_crossref_tolerates_invalid_optional_metadata(self) -> None:
+        for date_parts in (None, 2026, {"year": 2026}, "2026", [], [[2026, 13]]):
+            with self.subTest(date_parts=date_parts):
+                feed = InfoSources._crossref_feed({"message": {"items": [{
+                    "DOI": "10.1/test", "title": ["Result"], "author": 1,
+                    "published": {"date-parts": date_parts},
+                }, {"DOI": "10.1/valid", "title": ["Valid"]}]}})
+                self.assertEqual(len(feed["entries"]), 2)
+                self.assertNotIn("published_parsed", feed["entries"][0])
+
+    def test_plain_text_separates_paragraphs_and_skips_complete_math(self) -> None:
+        self.assertEqual(InfoSources._plain_text(
+            '<jats:p>First.</jats:p><jats:p>Second '
+            '<mml:math alttext="x"><br><mml:mi>x</mml:mi></mml:math>'
+            ' after.</jats:p>'
+        ), "First. Second x after.")
+
+    def test_empty_configuration_resets_previous_fetch_counts(self) -> None:
+        source = InfoSources({})
+        source.cached_feeds = 2
+        source.failed_feeds = 1
+        with patch("builtins.print"):
+            self.assertEqual(source.get_normalized_feeds(), [])
+        self.assertEqual((source.total_feeds, source.cached_feeds, source.failed_feeds), (0, 0, 0))
+
     def test_fetch_feed_retries_transient_failures(self) -> None:
         failures = [
             IncompleteRead(b"partial", 10),

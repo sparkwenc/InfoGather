@@ -36,6 +36,9 @@ def _report(
 
 
 class _TextExtractor(HTMLParser):
+    BLOCK_TAGS = {"br", "div", "li", "p", "jats:p"}
+    MATH_TAGS = {"math", "mml:math"}
+
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
@@ -43,22 +46,24 @@ class _TextExtractor(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if self.skip_depth:
-            self.skip_depth += 1
+            if tag in self.MATH_TAGS:
+                self.skip_depth += 1
             return
-        if tag == "mml:math":
+        if tag in self.MATH_TAGS:
             alt_text = dict(attrs).get("alttext")
             if alt_text:
                 self.parts.append(f" {alt_text} ")
             self.skip_depth = 1
             return
-        if tag in {"br", "div", "li", "p"}:
+        if tag in self.BLOCK_TAGS:
             self.parts.append(" ")
 
     def handle_endtag(self, tag: str) -> None:
         if self.skip_depth:
-            self.skip_depth -= 1
+            if tag in self.MATH_TAGS:
+                self.skip_depth -= 1
             return
-        if tag in {"div", "li", "p"}:
+        if tag in self.BLOCK_TAGS:
             self.parts.append(" ")
 
     def handle_data(self, data: str) -> None:
@@ -177,6 +182,8 @@ class InfoSources:
 
         total = len(requests)
         self.total_feeds = total
+        self.cached_feeds = 0
+        self.failed_feeds = 0
         _report(progress, 5, f"准备拉取 {total} 个源")
         print(
             f"Fetching {total} feeds with up to "
@@ -288,6 +295,10 @@ class InfoSources:
                 time.sleep(delay * (2 ** (attempt - 1)))
                 continue
 
+            response_headers = {
+                str(key).lower(): value
+                for key, value in response_headers.items()
+            }
             state_update = InfoSources._feed_state_from_headers(
                 response_headers,
                 previous=state,
@@ -315,11 +326,7 @@ class InfoSources:
                 time.sleep(wait)
                 continue
 
-            normalized_headers = {
-                str(key).lower(): value
-                for key, value in response_headers.items()
-            }
-            if "json" in str(normalized_headers.get("content-type", "")).lower():
+            if "json" in str(response_headers.get("content-type", "")).lower():
                 try:
                     feed = InfoSources._crossref_feed(
                         json.loads(response_content)
@@ -329,7 +336,7 @@ class InfoSources:
             else:
                 feed = feedparser.parse(
                     response_content,
-                    response_headers=normalized_headers,
+                    response_headers=response_headers,
                 )
             if feed.get("bozo"):
                 detail = feed.get("bozo_exception", "parse error")
@@ -342,6 +349,7 @@ class InfoSources:
                     continue
                 raise RuntimeError(f"{name}: invalid feed: {detail}")
             return feed, state_update
+
     @staticmethod
     def _crossref_feed(payload: object) -> dict:
         if not isinstance(payload, dict):
@@ -356,19 +364,20 @@ class InfoSources:
                 continue
             titles = work.get("title", [])
             if isinstance(titles, list):
-                title = str(titles[0]).strip() if titles else ""
+                title = str(titles[0] or "").strip() if titles else ""
             else:
                 title = str(titles or "").strip()
             if not title:
                 continue
             authors = []
-            for author in work.get("author", []) or []:
+            raw_authors = work.get("author", [])
+            for author in raw_authors if isinstance(raw_authors, list) else []:
                 if not isinstance(author, dict):
                     continue
                 name = " ".join(
-                    str(author.get(part, "")).strip()
+                    str(author.get(part) or "").strip()
                     for part in ("given", "family")
-                    if str(author.get(part, "")).strip()
+                    if str(author.get(part) or "").strip()
                 )
                 if name:
                     authors.append(name)
@@ -393,7 +402,7 @@ class InfoSources:
             if not isinstance(published, dict):
                 published = {}
             date_parts = published.get("date-parts", [])
-            if date_parts and isinstance(date_parts[0], list):
+            if isinstance(date_parts, list) and date_parts and isinstance(date_parts[0], list):
                 try:
                     parts = [*date_parts[0], 1, 1][:3]
                     entry["published_parsed"] = datetime(*parts).timetuple()
@@ -419,7 +428,8 @@ class InfoSources:
         try:
             response = urlopen(request, timeout=12)
         except HTTPError as exc:
-            return exc.code, exc.headers, b""
+            with exc:
+                return exc.code, exc.headers, b""
         with response:
             response_headers = response.headers
             status_code = response.status
@@ -465,7 +475,7 @@ class InfoSources:
             age = 0
         fresh_for = max(0, max_age - age)
         if (
-            fresh_for == 0
+            match is None
             and not no_cache
             and not no_store
             and status_code == 304
