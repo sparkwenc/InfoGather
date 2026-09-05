@@ -503,6 +503,19 @@ class InfoStorageTests(unittest.TestCase):
 
         self.assertEqual(stored["content"]["tags"], ["math.AG", "math.NT"])
 
+    def test_older_version_adds_cross_listing_without_replacing_current_state(self) -> None:
+        current = _entry(version=2, title="Current", noticed=1)
+        older = _entry(version=1, title="Stale", tags=["math.NT"])
+        with InfoStorage(":memory:") as storage, redirect_stdout(io.StringIO()):
+            storage.insert_entries([current])
+            self.assertEqual(storage.insert_entries([older]), 1)
+            stored = _items(storage)[0]
+            self.assertEqual(storage.insert_entries([older]), 0)
+        self.assertEqual(stored["content"]["tags"], ["math.AG", "math.NT"])
+        self.assertEqual(stored["content"]["titl"], "Current")
+        self.assertEqual((stored["version"], stored["noticed"], stored["state_rev"]), (2, 1, 0))
+        self.assertEqual(stored["updated"], current["updated"])
+
     def test_equal_version_applies_content_corrections(self) -> None:
         first = _entry(version=1, title="old title")
         corrected = _entry(version=1, title="new title")
@@ -777,6 +790,18 @@ class InfoStorageTests(unittest.TestCase):
             "2601.00001": 1,
             "arxiv.org": 0,
         })
+
+    def test_search_casefolds_unicode_in_entries_and_facets(self) -> None:
+        entry = _entry(version=1, title="KÄHLER Straße Σ", srce_id="ÉTUDE")
+        with InfoStorage(":memory:") as storage, redirect_stdout(io.StringIO()):
+            storage.insert_entries([entry])
+            for query in ("kähler", "KÄHLER", "STRASSE", "σ", "ς", "étude"):
+                with self.subTest(query=query):
+                    self.assertEqual(storage.query_entries(query_text=query)["total"], 1)
+                    facets = storage.query_facets(
+                        configured_tags={"math.AG"}, groups=[{"math.AG"}], query_text=query
+                    )
+                    self.assertEqual(facets["tag_counts"], {"math.AG": 1})
 
     def test_read_only_legacy_schema_raises_clear_error(self) -> None:
         with tempfile.TemporaryDirectory() as td:

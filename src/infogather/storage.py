@@ -394,6 +394,8 @@ class InfoStorage:
 
     def _configure_connection(self, *, initialize: bool) -> None:
         conn = self._get_conn()
+        conn.create_function("casefold", 1, str.casefold, deterministic=True)
+        conn.create_function("is_ascii", 1, str.isascii, deterministic=True)
         conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
         conn.execute("PRAGMA foreign_keys = ON")
         if not self._memory:
@@ -851,9 +853,6 @@ class InfoStorage:
             return 1
 
         stored_version = int(existing["version"])
-        if version < stored_version:
-            return 0
-
         existing_content = json.loads(existing["content"])
         existing_tags = existing_content.get("tags", []) or []
         incoming_tags = content.get("tags", []) or []
@@ -881,7 +880,7 @@ class InfoStorage:
             )
             return 1
 
-        if updated_at_us < int(existing["updated_at_us"]):
+        if version < stored_version or updated_at_us < int(existing["updated_at_us"]):
             if merged_tags == existing_tags:
                 return 0
             existing_content["tags"] = merged_tags
@@ -978,9 +977,9 @@ class InfoStorage:
         if selector_clause:
             conditions.append(selector_clause)
             params.extend(selector_params)
-        clean_query = query_text.strip().lower()
+        clean_query = query_text.strip().casefold()
         if clean_query:
-            exact_query = """instr(lower(
+            exact_query = """instr(casefold(
                     e.srce_id || ' ' ||
                     coalesce(json_extract(e.content, '$.titl'), '') || ' ' ||
                     coalesce(json_extract(e.content, '$.auth'), '') || ' ' ||
@@ -1001,8 +1000,10 @@ class InfoStorage:
                 ).replace("_", "\\_") + "%"
                 conditions.append(
                     f"""CASE WHEN
-                        instr(lower(e.srce_id), ?) > 0
+                        instr(casefold(e.srce_id), ?) > 0
                         OR e.content LIKE ? ESCAPE '\\'
+                        OR NOT is_ascii(e.content)
+                        OR e.content LIKE '%\\u%'
                     THEN {exact_query}
                     ELSE 0 END"""
                 )
