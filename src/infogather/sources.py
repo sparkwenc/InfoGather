@@ -690,4 +690,7 @@ class InfoSources:
         srce_id, separator, raw_version = value.rpartition("v")
         if not separator or not srce_id or not raw_version.isdigit():
             raise ValueError(f"invalid arXiv id: {raw_id!r}")
-        return srce_id, int(raw_version)
+        version = int(raw_version)
+        if not 1 <= version < 2 ** 63:
+            raise ValueError(f"invalid arXiv version: {raw_version!r}")
+        return srce_id, version

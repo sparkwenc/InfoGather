@@ -715,6 +715,8 @@ class InfoSourcesTests(unittest.TestCase):
                 "feed": {},
                 "entries": [
                     {"id": "missing-version", "summary": "bad"},
+                    {"id": "2601.00001v0"},
+                    {"id": "2601.00002v9223372036854775808"},
                     {
                         "id": "oai:arXiv.org:2601.00003v1",
                         "summary": "arXiv:2601.00003v1\r\nAbstract: Valid.",
