@@ -1,12 +1,18 @@
 function makeHttpError(resp, payload) {
-  const error = new Error(payload.error || `HTTP ${resp.status}`);
+  const error = new Error(payload?.error || `HTTP ${resp.status}`);
   error.status = resp.status;
   return error;
 }
 
 async function requestJson(url, options, { allowStatuses = [] } = {}) {
   const resp = await fetch(url, options);
-  const payload = await resp.json();
+  let payload;
+  try {
+    payload = await resp.json();
+  } catch (error) {
+    if (!resp.ok) throw makeHttpError(resp);
+    throw error;
+  }
   if (!resp.ok && !allowStatuses.includes(resp.status)) {
     throw makeHttpError(resp, payload);
   }
@@ -19,7 +25,7 @@ async function postJson(url, body) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body)
   });
-  if (!payload.ok) throw makeHttpError(resp, payload);
+  if (!payload?.ok) throw makeHttpError(resp, payload);
   return payload;
 }
 

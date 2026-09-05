@@ -169,6 +169,7 @@ function pauseInsPolling() {
   state.insStatusController?.abort();
   if (state.refreshInFlight || state.entriesRequest) {
     state.refreshController?.abort();
+    state.entriesRequest?.abort();
     state.refreshOnVisible = true;
   }
 }
@@ -356,7 +357,9 @@ async function updateFlag(item, field, value, btnEl) {
   const restoreFocus = btnEl.matches(":focus-visible");
   const update = field === "favored" ? api.setFavored : api.setNoticed;
   const refreshAtStart = state.refreshController;
+  const interruptedRefresh = Boolean(state.refreshInFlight || state.entriesRequest);
   refreshAtStart?.abort();
+  state.entriesRequest?.abort();
   let remainsVisible = true;
   let refreshed = false;
   let succeeded = false;
@@ -367,7 +370,7 @@ async function updateFlag(item, field, value, btnEl) {
     );
     item[field] = value;
     item.state_rev = response.state_rev;
-    if (state.refreshController !== refreshAtStart) {
+    if (interruptedRefresh || state.refreshController !== refreshAtStart) {
       remainsVisible = await refreshFilteredView();
       refreshed = true;
     } else {
@@ -515,7 +518,9 @@ async function loadTagTree(signal) {
 
 async function fetchEntries({ reset = false, signal } = {}) {
   if (!reset && state.entriesRequest) return false;
-  const request = {};
+  state.entriesRequest?.abort();
+  const request = new AbortController();
+  signal = signal ? AbortSignal.any([signal, request.signal]) : request.signal;
   let succeeded = false;
   state.entriesRequest = request;
   listEl.setAttribute("aria-busy", "true");

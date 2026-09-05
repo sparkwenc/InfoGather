@@ -1,12 +1,19 @@
 import shutil
 import subprocess
 import unittest
+from pathlib import Path
 
 from infogather.paths import WEB_DIR
 
 
 @unittest.skipUnless(shutil.which("node"), "node is required for JavaScript checks")
 class WebModuleTests(unittest.TestCase):
+    def test_application_request_races(self) -> None:
+        subprocess.run(
+            ["node", "--test", Path(__file__).with_name("test_app.mjs")],
+            check=True,
+        )
+
     def test_modules_parse_and_api_forwards_abort_signal(self) -> None:
         modules = [WEB_DIR / "js" / name for name in ("api.js", "app.js", "ui.js")]
         for module in modules:
@@ -39,6 +46,18 @@ class WebModuleTests(unittest.TestCase):
               process.exit(1);
             } catch (error) {
               if (!(error instanceof SyntaxError)) process.exit(1);
+            }
+            for (const json of [
+              async () => null,
+              async () => { throw new SyntaxError("HTML error page"); }
+            ]) {
+              globalThis.fetch = async () => ({ ok: false, status: 409, json });
+              try {
+                await api.restoreEntry("expired-token");
+                process.exit(1);
+              } catch (error) {
+                if (error.status !== 409) process.exit(1);
+              }
             }
         """
         subprocess.run(
