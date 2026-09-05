@@ -47,6 +47,42 @@ def _connect(path: Path):
 
 
 class InfoStorageTests(unittest.TestCase):
+    def test_v6_migration_preserves_state_and_builds_search_classification(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "entries.db"
+            with InfoStorage(path) as storage, redirect_stdout(io.StringIO()):
+                storage.insert_entries([_entry(version=1, noticed=1, title="Straße")], {
+                    "https://example.com/feed": {"etag": "cached"},
+                })
+                storage.favor_entry_if_current("arXiv", "2601.00001", 0, 0, 1)
+                before = _items(storage)
+            with _connect(path) as conn:
+                conn.execute("ALTER TABLE tab_entries DROP COLUMN search_ascii")
+                conn.execute("PRAGMA user_version = 6")
+            with InfoStorage(path) as storage:
+                self.assertEqual(_items(storage), before)
+                self.assertEqual(storage.query_entries(query_text="STRASSE")["total"], 1)
+                self.assertEqual(storage.get_feed_states()["https://example.com/feed"]["etag"], "cached")
+                self.assertEqual(storage._schema_version(), SCHEMA_VERSION)
+            with InfoStorage.open_current(path.as_uri() + "?mode=ro") as storage:
+                self.assertEqual(storage.query_entries(query_text="strasse")["total"], 1)
+
+    def test_search_classification_tracks_external_content_and_id_updates(self) -> None:
+        with InfoStorage(":memory:") as storage, redirect_stdout(io.StringIO()):
+            storage.insert_entries([_entry(version=1)])
+            conn = storage._get_conn()
+            self.assertEqual(conn.execute("SELECT search_ascii FROM tab_entries").fetchone()[0], 1)
+            for encoded in (False, True):
+                conn.execute("UPDATE tab_entries SET content = ?", (
+                    json.dumps({"titl": "Straße", "tags": []}, ensure_ascii=encoded),
+                ))
+                conn.commit()
+                self.assertEqual(conn.execute("SELECT search_ascii FROM tab_entries").fetchone()[0], 0)
+                self.assertEqual(storage.query_entries(query_text="STRASSE")["total"], 1)
+            conn.execute("UPDATE tab_entries SET content = '{}', srce_id = 'ÉTUDE'")
+            conn.commit()
+            self.assertEqual(storage.query_entries(query_text="étude")["total"], 1)
+
     def test_initialization_creates_database_parent(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "nested" / "entries.db"
@@ -802,6 +838,30 @@ class InfoStorageTests(unittest.TestCase):
                         configured_tags={"math.AG"}, groups=[{"math.AG"}], query_text=query
                     )
                     self.assertEqual(facets["tag_counts"], {"math.AG": 1})
+
+    def test_search_preserves_escaped_unicode_and_cross_field_phrases(self) -> None:
+        entry = _entry(version=1, title="KÄHLER Straße", srce_id="ÉTUDE")
+        entry["content"].update(auth="Author", abst="Ends here", tags=["First", "Second"])
+        with InfoStorage(":memory:") as storage, redirect_stdout(io.StringIO()):
+            storage.insert_entries([entry])
+            # Older/external writers can encode non-ASCII characters as JSON escapes.
+            storage._get_conn().execute(
+                "UPDATE tab_entries SET content = ?", (json.dumps(entry["content"]),)
+            )
+            storage._get_conn().commit()
+            for query in ("kähler", "strasse author", "étude kähler", "here first second"):
+                with self.subTest(query=query):
+                    self.assertEqual(storage.query_entries(query_text=query)["total"], 1)
+            self.assertEqual(storage.query_entries(query_text="tags")["total"], 0)
+
+    def test_search_preserves_sqlite_conversion_of_non_text_metadata(self) -> None:
+        entry = _entry(version=1)
+        entry["content"].update(titl=123.5, auth=True, abst={"nested": "value"})
+        with InfoStorage(":memory:") as storage, redirect_stdout(io.StringIO()):
+            storage.insert_entries([entry])
+            for query in ("123.5", '123.5 1 {"nested":"value"}', "nested"):
+                with self.subTest(query=query):
+                    self.assertEqual(storage.query_entries(query_text=query)["total"], 1)
 
     def test_read_only_legacy_schema_raises_clear_error(self) -> None:
         with tempfile.TemporaryDirectory() as td:

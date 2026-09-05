@@ -7,13 +7,18 @@ from urllib.parse import parse_qs, urlparse
 from .filters import parse_updated
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 BUSY_TIMEOUT_MS = 10_000
 MMAP_SIZE_BYTES = 256 * 1024 * 1024
 SQLITE_INT_MAX = 2 ** 63 - 1
 MAX_SOURCE_TYPE_LENGTH = 512
 MAX_SOURCE_ID_LENGTH = 4096
 MAX_FETCH_AT = 253_402_300_799
+SEARCH_ASCII_SQL = (
+    "length(CAST(srce_id AS BLOB)) = length(srce_id) AND "
+    "length(CAST(content AS BLOB)) = length(content) AND "
+    "instr(content, '\\u') = 0"
+)
 
 
 class InfoStorage:
@@ -402,7 +407,7 @@ class InfoStorage:
     def _configure_connection(self, *, initialize: bool) -> None:
         conn = self._get_conn()
         conn.create_function("casefold", 1, str.casefold, deterministic=True)
-        conn.create_function("is_ascii", 1, str.isascii, deterministic=True)
+        conn.create_function("entry_matches", 3, self._entry_matches, deterministic=True)
         conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
         conn.execute("PRAGMA foreign_keys = ON")
         if not self._memory:
@@ -573,6 +578,13 @@ class InfoStorage:
             raise RuntimeError("current schema has invalid tab_entries columns")
         if columns("tab_feed_state") != expected_feed_state:
             raise RuntimeError("current schema has invalid tab_feed_state columns")
+        generated = [
+            (row["name"], row["type"], row["hidden"])
+            for row in conn.execute("PRAGMA table_xinfo(tab_entries)")
+            if row["hidden"]
+        ]
+        if generated != [("search_ascii", "INTEGER", 3)]:
+            raise RuntimeError("current schema has invalid search classification")
 
         indexes = {
             row["name"]: row
@@ -612,6 +624,7 @@ class InfoStorage:
             ).fetchone()[0].lower().split()
         )
         required_checks = (
+            f"search_ascii integer generated always as ({SEARCH_ASCII_SQL.lower()}) stored",
             f"check (length(srce_ty) between 1 and {MAX_SOURCE_TYPE_LENGTH})",
             f"check (length(srce_id) between 1 and {MAX_SOURCE_ID_LENGTH})",
             f"check (typeof(version) = 'integer' and version between 1 and {SQLITE_INT_MAX})",
@@ -656,8 +669,8 @@ class InfoStorage:
                 raise RuntimeError(
                     f"cannot migrate tab_entries; missing columns: {sorted(missing)}"
                 )
-            conn.execute("DROP TABLE IF EXISTS tab_entries_v6")
-            self._create_entries_table("tab_entries_v6")
+            conn.execute("DROP TABLE IF EXISTS tab_entries_v7")
+            self._create_entries_table("tab_entries_v7")
             noticed_sql = "noticed" if "noticed" in columns else "0 AS noticed"
             state_rev_sql = (
                 "state_rev" if "state_rev" in columns else "0 AS state_rev"
@@ -701,7 +714,7 @@ class InfoStorage:
                     ))
                 conn.executemany(
                     """
-                    INSERT INTO tab_entries_v6 (
+                    INSERT INTO tab_entries_v7 (
                         srce_ty, srce_id, version, favored, noticed, state_rev,
                         updated, updated_at_us, content
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -709,7 +722,7 @@ class InfoStorage:
                     values,
                 )
             conn.execute("DROP TABLE tab_entries")
-            conn.execute("ALTER TABLE tab_entries_v6 RENAME TO tab_entries")
+            conn.execute("ALTER TABLE tab_entries_v7 RENAME TO tab_entries")
         else:
             self._create_entries_table("tab_entries")
 
@@ -739,6 +752,7 @@ class InfoStorage:
                 updated TEXT NOT NULL,
                 updated_at_us INTEGER NOT NULL DEFAULT 0,
                 content TEXT NOT NULL,
+                search_ascii INTEGER GENERATED ALWAYS AS ({SEARCH_ASCII_SQL}) STORED,
                 PRIMARY KEY (srce_ty, srce_id),
                 CHECK (length(srce_ty) BETWEEN 1 AND {MAX_SOURCE_TYPE_LENGTH}),
                 CHECK (length(srce_id) BETWEEN 1 AND {MAX_SOURCE_ID_LENGTH}),
@@ -776,9 +790,9 @@ class InfoStorage:
         ]
         if "url" not in columns or primary_key != ["url"]:
             raise RuntimeError("tab_feed_state URL must be its primary key")
-        conn.execute("DROP TABLE IF EXISTS tab_feed_state_v6")
+        conn.execute("DROP TABLE IF EXISTS tab_feed_state_v7")
         conn.execute(f"""
-            CREATE TABLE tab_feed_state_v6 (
+            CREATE TABLE tab_feed_state_v7 (
                 url TEXT PRIMARY KEY NOT NULL CHECK (length(trim(url)) > 0),
                 etag TEXT,
                 last_modified TEXT,
@@ -799,7 +813,7 @@ class InfoStorage:
         )
         next_fetch = "next_fetch_at" if "next_fetch_at" in columns else "0"
         conn.execute(f"""
-            INSERT INTO tab_feed_state_v6 (
+            INSERT INTO tab_feed_state_v7 (
                 url, etag, last_modified, next_fetch_at
             )
             SELECT url, {etag}, {modified},
@@ -812,7 +826,7 @@ class InfoStorage:
             FROM tab_feed_state
         """)
         conn.execute("DROP TABLE tab_feed_state")
-        conn.execute("ALTER TABLE tab_feed_state_v6 RENAME TO tab_feed_state")
+        conn.execute("ALTER TABLE tab_feed_state_v7 RENAME TO tab_feed_state")
 
     def _upsert_row(
         self,
@@ -930,6 +944,26 @@ class InfoStorage:
         return f" WHERE {' AND '.join(conditions)}" if conditions else ""
 
     @staticmethod
+    def _entry_matches(srce_id: str, raw_content: str, query: str) -> bool | None:
+        content = json.loads(raw_content)
+        title = content.get("titl")
+        author = content.get("auth")
+        abstract = content.get("abst")
+        tags = content.get("tags", [])
+        if not isinstance(tags, list):
+            return None
+        try:
+            text = " ".join((
+                srce_id, "" if title is None else title,
+                "" if author is None else author,
+                "" if abstract is None else abstract, " ".join(tags),
+            ))
+        except TypeError:
+            # Preserve SQLite's conversion rules for non-text legacy metadata.
+            return None
+        return query in text.casefold()
+
+    @staticmethod
     def _selector_sql(
         selected_tags: set[str],
         *,
@@ -979,7 +1013,7 @@ class InfoStorage:
             params.extend(selector_params)
         clean_query = query_text.strip().casefold()
         if clean_query:
-            exact_query = """instr(casefold(
+            exact_query = """coalesce(entry_matches(e.srce_id, e.content, ?), instr(casefold(
                     e.srce_id || ' ' ||
                     coalesce(json_extract(e.content, '$.titl'), '') || ' ' ||
                     coalesce(json_extract(e.content, '$.auth'), '') || ' ' ||
@@ -989,7 +1023,7 @@ class InfoStorage:
                         FROM json_each(e.content, '$.tags')
                         WHERE type = 'text'
                     ), '')
-                ), ?) > 0"""
+                ), ?) > 0)"""
             if (
                 not any(char.isspace() or char in {'"', '\\'} or ord(char) < 32
                         for char in clean_query)
@@ -1000,17 +1034,16 @@ class InfoStorage:
                 ).replace("_", "\\_") + "%"
                 conditions.append(
                     f"""CASE WHEN
-                        instr(casefold(e.srce_id), ?) > 0
+                        e.srce_id LIKE ? ESCAPE '\\'
                         OR e.content LIKE ? ESCAPE '\\'
-                        OR NOT is_ascii(e.content)
-                        OR e.content LIKE '%\\u%'
+                        OR e.search_ascii = 0
                     THEN {exact_query}
                     ELSE 0 END"""
                 )
-                params.extend([clean_query, pattern, clean_query])
+                params.extend([pattern, pattern, clean_query, clean_query])
             else:
                 conditions.append(exact_query)
-                params.append(clean_query)
+                params.extend([clean_query, clean_query])
         return conditions, params
 
     def _update_flag_if_current(
